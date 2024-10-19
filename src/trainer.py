@@ -8,8 +8,8 @@ from tqdm import tqdm
 
 from src.utilities import registry
 from src.utilities.saver import Saver
-from utilities.logger import BaseLogger
-from utilities.random import Reproducible
+from src.utilities.logger import BaseLogger
+from src.utilities.random import Reproducible
 
 
 @attr.s
