@@ -42,16 +42,19 @@ class LlamaSkipMLP(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.lora_size = int(config.intermediate_size * config.sparsity)
+        self.lora_size = int(config.intermediate_size * 0.2)
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
         self.act_fn = ACT2FN[config.hidden_act]
         self.lora_gate_proj = nn.Sequential(
-            nn.Linear(self.hidden_size,self.lora_size),
-            nn.Linear(self.lora_size,self.intermediate_size)
+            nn.Linear(self.hidden_size,self.lora_size, bias=config.mlp_bias),
+            nn.Linear(self.lora_size,self.intermediate_size, bias=config.mlp_bias)
         )
-    
+        self.sparsity = config.sparsity
+        self.mask = torch.zeros(self.intermediate_size)
+        self.mask[:int(self.intermediate_size*self.sparsity)]=1
+
     def forward(self, x):
         if self.config.pretraining_tp > 1:
             #TODO check this part of the code
@@ -71,25 +74,20 @@ class LlamaSkipMLP(nn.Module):
             ]
             down_proj = sum(down_proj)
         else:
-            unsqueezeX= x.view(-1,*x.shape[-1:],1)
-            mask_filter = (self.lora_gate_proj(x) > 0).unsqueeze(-1)
-            mask_flatten = mask_filter.view(-1, *mask_filter.shape[-2:]).to_sparse() #[batch, intermediate_size, 1]
-            sparse_gate_proj = mask_flatten * self.gate_proj.weight #[B X I X h]
-
-            filtered_gate_proj = torch.bmm(sparse_gate_proj,unsqueezeX)
-            if self.config.mlp_bias:
-                filtered_gate_proj += self.gate_proj.bias
-
-            sparse_up_proj = filtered_gate_proj *self.up_proj.weight
-            filtered_up_proj =  torch.bmm(sparse_up_proj,unsqueezeX)
-            if self.config.mlp_bias:
-                filtered_up_proj += self.gate_proj.bias
-            filtered_projection = self.act_fn(filtered_gate_proj) * filtered_up_proj
-            down_proj = torch.matmul(filtered_projection.transpose(-1,-2), self.down_proj.weight.t().unsqueeze(0)) 
+            unsqueezeX= x.view(-1,x.shape[-1])
+            # mask_indices = self.mask.repeat(unsqueezeX.shape[0],1).nonzero()
+            mask = (self.lora_gate_proj(unsqueezeX) * self.mask).to(torch.bool)
+            down_proj = []
+            for i in range(x.shape[0]):
+                down_proj.append((
+                        self.act_fn(unsqueezeX[i,:]@self.gate_proj.weight[mask[i,:],:].t())
+                        * (unsqueezeX[i,:]@self.up_proj.weight[mask[i,:],:].t())
+                    )@self.down_proj.weight[:,mask[i,:]].t()
+                )
+            down_proj = torch.cat(down_proj)
             if self.config.mlp_bias:
                 down_proj += self.down_proj.bias
-
-        return down_proj.to_dense().view(*x.shape[:-1],self.hidden_size)
+        return down_proj
 
 class LlamaSkipDecoderLayer(LlamaDecoderLayer):
     def __init__(self, config: LlamaSkipConnectionConfig, layer_idx: int):
