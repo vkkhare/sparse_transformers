@@ -1,7 +1,28 @@
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <vector>
+
+// Helper function for half precision atomic add
+__device__ __forceinline__ void atomicAdd_half(__half* address, __half val) {
+    unsigned int* address_as_ui = (unsigned int*)((char*)address - ((size_t)address & 2));
+    unsigned int old = *address_as_ui;
+    unsigned int assumed;
+    
+    do {
+        assumed = old;
+        __half_raw raw_val;
+        raw_val.x = __half_as_short(val);
+        unsigned int new_val;
+        if ((size_t)address & 2) {
+            new_val = (old & 0x0000FFFF) | (raw_val.x << 16);
+        } else {
+            new_val = (old & 0xFFFF0000) | raw_val.x;
+        }
+        old = atomicCAS(address_as_ui, assumed, new_val);
+    } while (assumed != old);
+}
 
 // CUDA kernel for sparse MLP forward pass
 template <typename scalar_t>
@@ -35,7 +56,7 @@ __global__ void sparse_mlp_forward_cuda_kernel(
     
     // Initialize shared memory
     for (int i = thread_idx; i < hidden_size; i += num_threads) {
-        shared_output[i] = 0.0f;
+        shared_output[i] = scalar_t(0.0f);
     }
     __syncthreads();
     
@@ -44,8 +65,8 @@ __global__ void sparse_mlp_forward_cuda_kernel(
         if (!batch_mask[j]) continue;
         
         // Compute gate and up projections
-        scalar_t gate_val = 0.0f;
-        scalar_t up_val = 0.0f;
+        scalar_t gate_val = scalar_t(0.0f);
+        scalar_t up_val = scalar_t(0.0f);
         
         #pragma unroll
         for (int k = 0; k < hidden_size; k++) {
@@ -56,19 +77,38 @@ __global__ void sparse_mlp_forward_cuda_kernel(
         // Apply activation
         scalar_t activated;
         if (use_silu) {
-            activated = gate_val / (1.0f + expf(-up_val));  // SiLU/Swish
+            if constexpr (std::is_same_v<scalar_t, half>) {
+                float gate_float = __half2float(gate_val);
+                float up_float = __half2float(up_val);
+                float result = up_float * gate_float / (1.0f + expf(-gate_float));
+                activated = __float2half(result);
+            } else {
+                activated = up_val * gate_val / (1.0f + expf(-gate_val));
+            }
         } else {
-            // GELU approximation
-            const scalar_t x = gate_val;
-            activated = 0.5f * x * (1.0f + tanhf(0.7978845608028654f * 
-                (x + 0.044715f * x * x * x))) * up_val;
+            if constexpr (std::is_same_v<scalar_t, half>) {
+                float x = __half2float(gate_val);
+                float up_float = __half2float(up_val);
+                float result = 0.5f * x * (1.0f + tanhf(0.7978845608028654f * 
+                    (x + 0.044715f * x * x * x))) * up_float;
+                activated = __float2half(result);
+            } else {
+                const scalar_t x = gate_val;
+                activated = 0.5f * x * (1.0f + tanhf(0.7978845608028654f * 
+                    (x + 0.044715f * x * x * x))) * up_val;
+            }
         }
         
         // Down projection - atomic add to shared memory
         #pragma unroll
         for (int k = 0; k < hidden_size; k++) {
-            atomicAdd(&shared_output[k], 
-                     activated * down_weight[k * intermediate_size + j]);
+            if constexpr (std::is_same_v<scalar_t, at::Half>) {
+                atomicAdd_half(reinterpret_cast<__half*>(&shared_output[k]), 
+                    __hmul(activated, down_weight[k * intermediate_size + j]));
+            } else {
+                atomicAdd(&shared_output[k], 
+                    activated * down_weight[k * intermediate_size + j]);
+            }
         }
     }
     
@@ -106,8 +146,8 @@ torch::Tensor sparse_mlp_forward_cuda(
     TORCH_CHECK(shared_mem_size <= prop.sharedMemPerBlock,
                "Required shared memory exceeds device limits");
     
-    // Launch kernel
-    AT_DISPATCH_FLOATING_TYPES(input.type(), "sparse_mlp_forward_cuda", ([&] {
+    // Launch kernel with support for both float and half
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(input.scalar_type(), "sparse_mlp_forward_cuda", ([&] {
         sparse_mlp_forward_cuda_kernel<scalar_t><<<batch_size, threads_per_block, shared_mem_size>>>(
             input.data_ptr<scalar_t>(),
             gate_weight.data_ptr<scalar_t>(),

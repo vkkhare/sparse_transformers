@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from typing import List
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin
-from src.ops.sparse_mlp import sparse_mlp_forward
+from sparse_mlp import sparse_mlp_forward
 
 logger = logging.get_logger(__name__)
 
@@ -47,21 +47,23 @@ class LlamaSkipMLP(nn.Module):
             nn.Linear(self.hidden_size,self.lora_size, bias=config.mlp_bias),
             nn.Linear(self.lora_size,self.intermediate_size, bias=config.mlp_bias)
         )
-        self.sparsity = config.sparsity
-        self.mask = torch.zeros(self.intermediate_size)
-        self.mask[:int(self.intermediate_size*self.sparsity)]=1
+        self.sparsity = 0.2
+        mask = torch.zeros(config.intermediate_size)
+        mask[:int(config.intermediate_size * self.sparsity)] = 1
+        self.register_buffer('mask', mask)
 
     def forward(self, x):
         unsqueezeX = x.view(-1, x.shape[-1])
         mask = (self.lora_gate_proj(unsqueezeX) * self.mask).to(torch.bool)
         
+        act_fn_name = "silu" if isinstance(self.act_fn, nn.SiLU) else self.act_fn.__name__
         down_proj = sparse_mlp_forward(
             unsqueezeX,
             self.gate_proj.weight,
             self.up_proj.weight,
             self.down_proj.weight,
             mask,
-            self.act_fn.__name__
+            act_fn_name
         )
         
         if self.config.mlp_bias:
