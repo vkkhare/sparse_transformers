@@ -207,9 +207,23 @@ void sparse_mlp_forward_cpu_impl(
                 act_timer.stop();
 
                 down_timer.start();
-                auto down_weight_masked = down_weight.t().index({mask_indices}).contiguous().detach();
-                auto output_view = output.select(0, i).view({1, -1});
+
+                Timer index_timer("down_index");
+                index_timer.start();
+                auto down_weight_masked = down_weight.index_select(1, mask_indices);
+                index_timer.stop();
+
+                Timer transpose_timer("down_transpose"); 
+                transpose_timer.start();
+                down_weight_masked = down_weight_masked.contiguous().t().detach();
+                transpose_timer.stop();
+
+                Timer matmul_timer("down_matmul");
+                matmul_timer.start();
+                auto output_view = output.select(0, i).view({1, -1}).detach();
                 torch::matmul_out(output_view, activated_view_narrow, down_weight_masked);
+                matmul_timer.stop();
+
                 down_timer.stop();
             } else {
                 output.select(0, i).zero_();
