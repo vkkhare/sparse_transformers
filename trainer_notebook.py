@@ -8,7 +8,8 @@ from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 from transformers.models.llama import LlamaForCausalLM
 
 # Set device
-device = torch.device("cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cpu")
 
 # Register the custom model and config
 AutoConfig.register("llama-skip", LlamaSkipConnectionConfig)
@@ -84,6 +85,7 @@ with torch.no_grad():
         eos_token_id=tokenizer.eos_token_id
     )
     
+    
 generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 print("SkipLlama", generated_text)
 
@@ -118,13 +120,32 @@ print("Time taken for 5 inferences.")
 
 start1 = time.time()
 for i in range(5):
-    out = llamaSkipPipe.model.forward(input_ids, attention_mask,use_cache=False)
+    with torch.no_grad():
+        outputs = llamaSkipPipe.model.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=1,
+            temperature=0.7,
+            top_p=0.9,
+            num_return_sequences=1,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
 start2 = time.time()
 print("Llama Skip pipeline time: ", start2 - start1)
 start3 = time.time()
 for i in range(5):
-    out = llamaPipe.model.forward(input_ids, attention_mask,use_cache=False)
-
+    with torch.no_grad():
+        outputs = llamaPipe.model.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=1,
+            temperature=0.7,
+            top_p=0.9,
+            num_return_sequences=1,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
 
 start4 = time.time()
 
