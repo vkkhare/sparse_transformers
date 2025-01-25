@@ -1,5 +1,6 @@
-from transformers import LlamaConfig, PreTrainedModel
+from transformers import PreTrainedModel
 from torch.nn import CrossEntropyLoss
+
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
@@ -12,9 +13,8 @@ from transformers.utils import (
     logging
 )
 from transformers.models.llama.modeling_llama import(
-     LlamaRMSNorm, LlamaRotaryEmbedding, LlamaDecoderLayer, LlamaPreTrainedModel, 
-     LLAMA_INPUTS_DOCSTRING, _CONFIG_FOR_DOC, LLAMA_START_DOCSTRING,
-     _prepare_4d_causal_attention_mask_with_cache_position
+     LlamaRMSNorm, LlamaRotaryEmbedding, LlamaDecoderLayer, 
+     LLAMA_INPUTS_DOCSTRING, _CONFIG_FOR_DOC, LLAMA_START_DOCSTRING
 )
 from typing import List, Optional, Tuple, Union
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
@@ -25,15 +25,11 @@ import torch.nn.functional as F
 from typing import List
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin
+from src.ops.sparse_mlp import sparse_mlp_forward
 
 logger = logging.get_logger(__name__)
 
-class LlamaSkipConnectionConfig(LlamaConfig):
-    model_type = "llama-skip"
-
-    def __init__(self, sparsity=0.2, **kwargs):
-        super().__init__(**kwargs)
-        self.sparsity = sparsity
+from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 
 class LlamaSkipMLP(nn.Module):
 
@@ -56,37 +52,20 @@ class LlamaSkipMLP(nn.Module):
         self.mask[:int(self.intermediate_size*self.sparsity)]=1
 
     def forward(self, x):
-        if self.config.pretraining_tp > 1:
-            #TODO check this part of the code
-            slice = self.intermediate_size // self.config.pretraining_tp
-            gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
-            up_proj_slices = self.up_proj.weight.split(slice, dim=0)
-            down_proj_slices = self.down_proj.weight.split(slice, dim=1)
-
-            gate_proj = torch.cat(
-                [F.linear(x, gate_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1
-            )
-            up_proj = torch.cat([F.linear(x, up_proj_slices[i]) for i in range(self.config.pretraining_tp)], dim=-1)
-
-            intermediate_states = (self.act_fn(gate_proj) * up_proj).split(slice, dim=2)
-            down_proj = [
-                F.linear(intermediate_states[i], down_proj_slices[i]) for i in range(self.config.pretraining_tp)
-            ]
-            down_proj = sum(down_proj)
-        else:
-            unsqueezeX= x.view(-1,x.shape[-1])
-            # mask_indices = self.mask.repeat(unsqueezeX.shape[0],1).nonzero()
-            mask = (self.lora_gate_proj(unsqueezeX) * self.mask).to(torch.bool)
-            down_proj = []
-            for i in range(x.shape[0]):
-                down_proj.append((
-                        self.act_fn(unsqueezeX[i,:]@self.gate_proj.weight[mask[i,:],:].t())
-                        * (unsqueezeX[i,:]@self.up_proj.weight[mask[i,:],:].t())
-                    )@self.down_proj.weight[:,mask[i,:]].t()
-                )
-            down_proj = torch.cat(down_proj)
-            if self.config.mlp_bias:
-                down_proj += self.down_proj.bias
+        unsqueezeX = x.view(-1, x.shape[-1])
+        mask = (self.lora_gate_proj(unsqueezeX) * self.mask).to(torch.bool)
+        
+        down_proj = sparse_mlp_forward(
+            unsqueezeX,
+            self.gate_proj.weight,
+            self.up_proj.weight,
+            self.down_proj.weight,
+            mask,
+            self.act_fn.__name__
+        )
+        
+        if self.config.mlp_bias:
+            down_proj += self.down_proj.bias
         return down_proj
 
 class LlamaSkipDecoderLayer(LlamaDecoderLayer):
@@ -127,8 +106,8 @@ class LlamaSkipPreTrainedModel(PreTrainedModel):
 
 
 class LlamaSkipConnectionModel(LlamaSkipPreTrainedModel):
-    def __init__(self, config: LlamaSkipConnectionConfig):
-        super(LlamaSkipPreTrainedModel, self).__init__(config)
+    def __init__(self, config):
+        super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -279,11 +258,6 @@ class LlamaSkipConnectionModel(LlamaSkipPreTrainedModel):
         past_key_values: Cache,
         output_attentions: bool,
     ):
-        # TODO: As of torch==2.2.0, the `attention_mask` passed to the model in `generate` is 2D and of dynamic length even when the static
-        # KV cache is used. This is an issue for torch.compile which then recaptures cudagraphs at each decode steps due to the dynamic shapes.
-        # (`recording cudagraph tree for symint key 13`, etc.), which is VERY slow. A workaround is `@torch.compiler.disable`, but this prevents using
-        # `fullgraph=True`. See more context in https://github.com/huggingface/transformers/pull/29114
-
         if self.config._attn_implementation == "flash_attention_2":
             if attention_mask is not None and 0.0 in attention_mask:
                 return attention_mask
@@ -306,10 +280,9 @@ class LlamaSkipConnectionModel(LlamaSkipPreTrainedModel):
                 return None
 
         dtype, device = input_tensor.dtype, input_tensor.device
-        min_dtype = torch.finfo(dtype).min
         sequence_length = input_tensor.shape[1]
         if using_static_cache:
-            target_length = past_key_values.get_max_length()
+            target_length = past_key_values.get_max_cache_shape()
         else:
             target_length = (
                 attention_mask.shape[-1]
@@ -318,13 +291,12 @@ class LlamaSkipConnectionModel(LlamaSkipPreTrainedModel):
             )
 
         # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
-        causal_mask = _prepare_4d_causal_attention_mask_with_cache_position(
+        causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
             attention_mask,
             sequence_length=sequence_length,
             target_length=target_length,
             dtype=dtype,
             device=device,
-            min_dtype=min_dtype,
             cache_position=cache_position,
             batch_size=input_tensor.shape[0],
         )
@@ -338,7 +310,64 @@ class LlamaSkipConnectionModel(LlamaSkipPreTrainedModel):
             # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
             # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
             # Details: https://github.com/pytorch/pytorch/issues/110213
+            min_dtype = torch.finfo(dtype).min
             causal_mask = AttentionMaskConverter._unmask_unattended(causal_mask, min_dtype)
+
+        return causal_mask
+
+    @staticmethod
+    def _prepare_4d_causal_attention_mask_with_cache_position(
+        attention_mask: torch.Tensor,
+        sequence_length: int,
+        target_length: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        cache_position: torch.Tensor,
+        batch_size: int,
+        **kwargs,
+    ):
+        """
+        Creates a causal 4D mask of shape `(batch_size, 1, query_length, key_value_length)` from a 2D mask of shape
+        `(batch_size, key_value_length)`, or if the input `attention_mask` is already 4D, do nothing.
+
+        Args:
+            attention_mask (`torch.Tensor`):
+                A 2D attention mask of shape `(batch_size, key_value_length)` or a 4D attention mask of shape
+                `(batch_size, 1, query_length, key_value_length)`.
+            sequence_length (`int`):
+                The sequence length being processed.
+            target_length (`int`):
+                The target length: when generating with static cache, the mask should be as long as the static cache,
+                to account for the 0 padding, the part of the cache that is not filled yet.
+            dtype (`torch.dtype`):
+                The dtype to use for the 4D attention mask.
+            device (`torch.device`):
+                The device to plcae the 4D attention mask on.
+            cache_position (`torch.Tensor`):
+                Indices depicting the position of the input sequence tokens in the sequence.
+            batch_size (`torch.Tensor`):
+                Batch size.
+        """
+        if attention_mask is not None and attention_mask.dim() == 4:
+            # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
+            causal_mask = attention_mask
+        else:
+            min_dtype = torch.finfo(dtype).min
+            causal_mask = torch.full(
+                (sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device
+            )
+            if sequence_length != 1:
+                causal_mask = torch.triu(causal_mask, diagonal=1)
+            causal_mask *= torch.arange(target_length, device=device) > cache_position.reshape(-1, 1)
+            causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
+            if attention_mask is not None:
+                causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+                mask_length = attention_mask.shape[-1]
+                padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
+                padding_mask = padding_mask == 0
+                causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
+                    padding_mask, min_dtype
+                )
 
         return causal_mask
 
@@ -494,7 +523,7 @@ class LlamaSkipConnectionForCausalLM(LlamaSkipPreTrainedModel, GenerationMixin):
             if past_key_values:
                 position_ids = position_ids[:, -input_ids.shape[1] :]
 
-                # This `clone` call is needed to avoid recapturing cuda graphs with `torch.compile`'s  `mode="reduce-overhead`, as otherwise the input `position_ids` would have various stride during the decoding. Here, simply using `.contiguous()` is not sufficient as in the batch size = 1 case, `position_ids` is already contiguous but with varying stride which retriggers a capture.
+                # This `clone` call is needed to avoid recapturing cuda graphs with `torch.compile`'s  `mode="reduce-overhead", as otherwise the input `position_ids` would have various stride during the decoding. Here, simply using `.contiguous()` is not sufficient as in the batch size = 1 case, `position_ids` is already contiguous but with varying stride which retriggers a capture.
                 position_ids = position_ids.clone(memory_format=torch.contiguous_format)
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
@@ -515,7 +544,7 @@ class LlamaSkipConnectionForCausalLM(LlamaSkipPreTrainedModel, GenerationMixin):
             dtype = self.lm_head.weight.dtype
             min_dtype = torch.finfo(dtype).min
 
-            attention_mask = _prepare_4d_causal_attention_mask_with_cache_position(
+            attention_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
                 attention_mask,
                 sequence_length=sequence_length,
                 target_length=past_key_values.get_max_length(),
