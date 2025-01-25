@@ -1,4 +1,6 @@
 # %%
+import os
+os.environ['MAX_JOBS'] = '16' 
 from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
 import torch
 from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM
@@ -12,98 +14,118 @@ device = torch.device("cpu")
 AutoConfig.register("llama-skip", LlamaSkipConnectionConfig)
 AutoModelForCausalLM.register(LlamaSkipConnectionConfig, LlamaSkipConnectionForCausalLM)
 
-try:
-    # Load base model and tokenizer
-    model_id = "vkkhare/llama-skip"
-    checkpoint = "meta-llama/Llama-3.2-1B-Instruct"
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
-    
-    # Set padding token to be the same as EOS token
-    tokenizer.pad_token = tokenizer.eos_token
-    
-    # Create custom config and model
-    config = LlamaSkipConnectionConfig.from_pretrained(model_id)
-    
-    # Load model without device_map
-    model = LlamaSkipConnectionForCausalLM.from_pretrained(
-        checkpoint, 
-        config=config,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    ).to(device)
+# Load base model and tokenizer
+model_id = "vkkhare/llama-skip"
+checkpoint = "meta-llama/Llama-3.2-1B-Instruct"
+tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
 
-    # Move all masks to the correct device
-    for module in model.modules():
-        if hasattr(module, 'mask'):
-            module.mask = module.mask.to(device)
+# Set padding token to be the same as EOS token
+tokenizer.pad_token = tokenizer.eos_token
 
-    model.eval()
+# Create custom config and model
+config = LlamaSkipConnectionConfig.from_pretrained(model_id)
 
-    # Generate text
-    sequence = "Give recipe of burrito including all the ingredients and their quantity."
-    inputs = tokenizer(
-        sequence, 
-        return_tensors='pt',
-        padding=True,
-        truncation=True,
-        max_length=512
-    )
-    
-    # Explicitly move all input tensors to the same device as model
-    input_ids = inputs["input_ids"].to(device)
-    attention_mask = inputs["attention_mask"].to(device)
-    
-    # Debug prints
-    print(f"Model device: {next(model.parameters()).device}")
-    print(f"Input IDs device: {input_ids.device}")
-    print(f"Attention Mask device: {attention_mask.device}")
+# Load model without device_map
+model = LlamaSkipConnectionForCausalLM.from_pretrained(
+    checkpoint, 
+    config=config,
+    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+).to(device)
 
-    with torch.no_grad():
-        outputs = model.generate(
-            input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=10,
-            temperature=0.7,
-            top_p=0.9,
-            num_return_sequences=1,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-        
-    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    print(generated_text)
-except Exception as e:
-    print(f"An error occurred: {str(e)}")
-    print(f"Error type: {type(e)}")
-    import traceback
-    traceback.print_exc()
-    
+# Move all masks to the correct device
+for module in model.modules():
+    if hasattr(module, 'mask'):
+        module.mask = module.mask.to(device)
 
-# # Update the pipeline to use the same device
-# pipe = pipeline(
-#     "text-generation",
-#     model=model,
-#     tokenizer=tokenizer,
-#     device=device,
-#     max_new_tokens=1000,
-#     eos_token_id=tokenizer.eos_token_id
-# )
+model.eval()
+
+# Generate text
+sequence = "Give recipe of burrito including all the ingredients and their quantity."
+inputs = tokenizer(
+    sequence, 
+    return_tensors='pt',
+    padding=True,
+    truncation=True,
+    max_length=512
+)
+
+# Explicitly move all input tensors to the same device as model
+input_ids = inputs["input_ids"].to(device)
+attention_mask = inputs["attention_mask"].to(device)
+
+# Debug prints
+print(f"Model device: {next(model.parameters()).device}")
+print(f"Input IDs device: {input_ids.device}")
+print(f"Attention Mask device: {attention_mask.device}")
 
 
-# Comment out unused code
-# %%
-# model.push_to_hub("vkkhare/llama-skip")
-# config.push_to_hub("vkkhare/llama-skip")
-
-# %%
-# sequence = "In a hole in the ground there lived a hobbit."
-# input= tokenizer(sequence, return_tensors='pt')
-# print(model.eval())
-
-
-# %%
+llamaSkipPipe = pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    max_new_tokens = 1000,
+    device=device,
+    eos_token_id=tokenizer.eos_token_id
+)
 # messages = [
 #     {"role": "system", "content": "You are a pirate chatbot who always responds in pirate speak!"},
 #     {"role": "user", "content": "Who are you?"},
 # ]
-# out = pipe.model.generate(input["input_ids"], max_length=20)
-# print(tokenizer.decode(out[0]))
+
+with torch.no_grad():
+    outputs = llamaSkipPipe.model.generate(
+        input_ids,
+        attention_mask=attention_mask,
+        max_new_tokens=10,
+        temperature=0.7,
+        top_p=0.9,
+        num_return_sequences=1,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id
+    )
+    
+generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print("SkipLlama", generated_text)
+
+
+llamaPipe = pipeline(
+    "text-generation",
+    device=device,
+    model=checkpoint,
+    tokenizer=tokenizer,
+    max_new_tokens = 1000,
+    eos_token_id=tokenizer.eos_token_id
+)
+
+with torch.no_grad():
+    outputs = llamaPipe.model.generate(
+        input_ids,
+        attention_mask=attention_mask,
+        max_new_tokens=10,
+        temperature=0.7,
+        top_p=0.9,
+        num_return_sequences=1,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id
+    )
+    
+generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print("standard Llama ", generated_text)
+
+
+import time
+print("Time taken for 5 inferences.")
+
+start1 = time.time()
+for i in range(5):
+    out = llamaSkipPipe.model.forward(input_ids, attention_mask,use_cache=False)
+start2 = time.time()
+print("Llama Skip pipeline time: ", start2 - start1)
+start3 = time.time()
+for i in range(5):
+    out = llamaPipe.model.forward(input_ids, attention_mask,use_cache=False)
+
+
+start4 = time.time()
+
+print("Llama StandardPipeline time: ", start4 - start3)
