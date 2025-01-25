@@ -26,7 +26,7 @@ from typing import List
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin
 from sparse_mlp import sparse_mlp_forward
-
+import sparse_mlp
 logger = logging.get_logger(__name__)
 
 from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
@@ -52,18 +52,22 @@ class LlamaSkipMLP(nn.Module):
         mask[:int(config.intermediate_size * self.sparsity)] = 1
         self.register_buffer('mask', mask)
 
+        # Create instance-specific buffer pool
+        self.buffer_pool = sparse_mlp.BufferPoolHandle(self.hidden_size, self.intermediate_size)
+        
     def forward(self, x):
         unsqueezeX = x.view(-1, x.shape[-1])
         mask = (self.lora_gate_proj(unsqueezeX) * self.mask).to(torch.bool)
         
-        act_fn_name = "silu" if isinstance(self.act_fn, nn.SiLU) else self.act_fn.__name__
-        down_proj = sparse_mlp_forward(
+        act_fn_name = "silu" if isinstance(self.act_fn, nn.SiLU) else "gelu"
+        down_proj = sparse_mlp.sparse_mlp_forward(
             unsqueezeX,
             self.gate_proj.weight,
             self.up_proj.weight,
             self.down_proj.weight,
             mask,
-            act_fn_name
+            act_fn_name,
+            self.buffer_pool
         )
         
         if self.config.mlp_bias:

@@ -8,8 +8,8 @@ from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 from transformers.models.llama import LlamaForCausalLM
 
 # Set device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# device = torch.device("cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 # Register the custom model and config
 AutoConfig.register("llama-skip", LlamaSkipConnectionConfig)
@@ -77,7 +77,7 @@ with torch.no_grad():
     outputs = llamaSkipPipe.model.generate(
         input_ids,
         attention_mask=attention_mask,
-        max_new_tokens=10,
+        max_new_tokens=5,
         temperature=0.7,
         top_p=0.9,
         num_return_sequences=1,
