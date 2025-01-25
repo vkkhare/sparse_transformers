@@ -18,19 +18,8 @@ void sparse_mlp_forward_cpu_impl(
     const std::string& activation_fn,
     torch::Tensor& output) {
     
-    TORCH_CHECK(input.dim() == 2, "Input must be 2D tensor");
-    TORCH_CHECK(mask.dim() == 2, "Mask must be 2D tensor");
-    TORCH_CHECK(gate_weight.dim() == 2, "Gate weight must be 2D tensor");
-    TORCH_CHECK(up_weight.dim() == 2, "Up weight must be 2D tensor");
-    TORCH_CHECK(down_weight.dim() == 2, "Down weight must be 2D tensor");
-    
     auto batch_size = input.size(0);
     auto hidden_size = input.size(1);
-    
-    TORCH_CHECK(mask.size(0) == batch_size, "Mask batch size mismatch");
-    TORCH_CHECK(gate_weight.size(1) == hidden_size, "Gate weight dimension mismatch");
-    TORCH_CHECK(up_weight.size(1) == hidden_size, "Up weight dimension mismatch");
-    TORCH_CHECK(down_weight.size(0) == hidden_size, "Down weight dimension mismatch");
     
     #pragma omp parallel for
     for (int64_t i = 0; i < batch_size; i++) {
