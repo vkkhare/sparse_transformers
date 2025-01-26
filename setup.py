@@ -1,52 +1,59 @@
-from setuptools import setup
-from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension
+from setuptools import setup, find_packages
+from torch.utils.cpp_extension import BuildExtension, CppExtension
+import os
 import torch
+from pathlib import Path
+import shutil
+import sys
 
-# Optimize for speed with architecture-specific flags
-extra_compile_args = {
-    'cxx': [
-        '-O3',  # Maximum optimization
-        '-ffast-math',  # Enable fast math operations
-        '-march=native',  # Optimize for current CPU architecture
-        '-fopenmp',  # Enable OpenMP
-        '-std=c++17'
-    ],
-    'nvcc': [
-        '-O3',
-        '-std=c++17',
-        '--use_fast_math',
-        '-U__CUDA_NO_HALF_OPERATORS__',
-        '-U__CUDA_NO_HALF_CONVERSIONS__',
-        '-U__CUDA_NO_HALF2_OPERATORS__'
-    ]
-}
+# Create build directory if it doesn't exist
+build_dir = Path(__file__).parent / 'build'
+if build_dir.exists():
+    shutil.rmtree(build_dir)
+build_dir.mkdir(parents=True)
+(build_dir / 'lib').mkdir(exist_ok=True)
 
-# Add CUDA arch flags if CUDA is available
-if torch.cuda.is_available():
-    # Get compute capability of the current GPU
-    arch_list = [f'sm_{torch.cuda.get_device_capability()[0]}{torch.cuda.get_device_capability()[1]}']
-    for arch in arch_list:
-        extra_compile_args['nvcc'].extend([
-            f'-gencode=arch=compute_{arch[3:]},code={arch}',
-        ])
+# Set environment variables to control build output
+os.environ['TORCH_BUILD_DIR'] = str(build_dir)
+os.environ['BUILD_LIB'] = str(build_dir / 'lib')
+os.environ['BUILD_TEMP'] = str(build_dir / 'temp')
+
+class CustomBuildExtension(BuildExtension):
+    def get_ext_filename(self, ext_name):
+        # Force output to build directory
+        filename = super().get_ext_filename(ext_name)
+        return str(build_dir / 'lib' / os.path.basename(filename))
+
+    def get_ext_fullpath(self, ext_name):
+        # Override to ensure extension is built in our build directory
+        filename = self.get_ext_filename(ext_name)
+        return str(build_dir / 'lib' / filename)
 
 setup(
     name='sparse_mlp',
+    packages=find_packages(),
     ext_modules=[
-        CUDAExtension(
+        CppExtension(
             name='sparse_mlp',
-            sources=[
-                'csrc/sparse_mlp_op.cpp',
-                'csrc/sparse_mlp_cuda.cu'
+            sources=['sparse_mlp/csrc/sparse_mlp_op.cpp'],
+            extra_compile_args={
+                'cxx': ['-O3', '-ffast-math', '-march=native', '-fopenmp'],
+            },
+            libraries=['gomp'],
+            include_dirs=[
+                # Main PyTorch include directory
+                os.path.dirname(torch.__file__) + '/include',
+                # TorchScript includes
+                os.path.dirname(torch.__file__) + '/include/torch/csrc/api/include',
+                # ATen includes
+                os.path.dirname(torch.__file__) + '/include/ATen',
+                # C10 includes
+                os.path.dirname(torch.__file__) + '/include/c10',
             ],
-            extra_compile_args=extra_compile_args
-        ) if torch.cuda.is_available() else CppExtension(
-            name='sparse_mlp',
-            sources=['csrc/sparse_mlp_op.cpp'],
-            extra_compile_args=extra_compile_args['cxx']
+            library_dirs=[str(build_dir / 'lib')],  # Specify library output directory
         )
     ],
     cmdclass={
-        'build_ext': BuildExtension
+        'build_ext': CustomBuildExtension.with_options(no_python_abi_suffix=True),
     }
 ) 

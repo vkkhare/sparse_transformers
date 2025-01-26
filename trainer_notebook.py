@@ -1,13 +1,20 @@
 # %%
-import os
-os.environ['MAX_JOBS'] = '16' 
-from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
 import torch
-from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM
+
+from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
+from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection
 from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 from transformers.models.llama import LlamaForCausalLM
 import gc
 import time
+
+# Enable TorchScript optimization
+torch.jit.enable_onednn_fusion(True)
+torch._C._jit_override_can_fuse_on_cpu(True)
+torch._C._jit_override_can_fuse_on_gpu(True)
+torch._C._jit_set_texpr_fuser_enabled(True)
+torch._C._jit_set_profiling_executor(True)
+torch._C._jit_set_profiling_mode(True)
 
 # Set device
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,6 +48,18 @@ for module in model.modules():
         module.mask = module.mask.to(device)
 
 model.eval()
+# Create scripted version of the model
+scripted_model = model
+for module in scripted_model.modules():
+    if isinstance(module, LlamaSkipMLP) or isinstance(module, FastLoRAProjection):
+        module.eval()  # Ensure in eval mode before scripting
+        try:
+            scripted_module = torch.jit.script(module)
+            # Replace the module's forward method with the scripted version
+            module.forward = scripted_module.forward
+        except Exception as e:
+            print(f"Failed to script module {type(module).__name__}: {str(e)}")
+            continue
 
 # Generate text
 sequence = "Give recipe of burrito including all the ingredients and their quantity."
@@ -61,36 +80,28 @@ print(f"Model device: {next(model.parameters()).device}")
 print(f"Input IDs device: {input_ids.device}")
 print(f"Attention Mask device: {attention_mask.device}")
 
-
-llamaSkipPipe = pipeline(
-    "text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    max_new_tokens = 1000,
-    device=device,
-    eos_token_id=tokenizer.eos_token_id
-)
+# Create pipelines for each model variant
+# llamaSkipPipe = pipeline(
+#     "text-generation",
+#     model=model,
+#     tokenizer=tokenizer,
+#     max_new_tokens = 1000,
+#     device=device,
+#     eos_token_id=tokenizer.eos_token_id
+# )
 # messages = [
 #     {"role": "system", "content": "You are a pirate chatbot who always responds in pirate speak!"},
 #     {"role": "user", "content": "Who are you?"},
 # ]
 
-# with torch.no_grad():
-#     outputs = llamaSkipPipe.model.generate(
-#         input_ids,
-#         attention_mask=attention_mask,
-#         max_new_tokens=5,
-#         temperature=0.7,
-#         top_p=0.9,
-#         num_return_sequences=1,
-#         pad_token_id=tokenizer.pad_token_id,
-#         eos_token_id=tokenizer.eos_token_id
-#     )
-    
-    
-# generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-# print("SkipLlama", generated_text)
-
+llamaSkipScriptedPipe = pipeline(
+    "text-generation",
+    model=scripted_model,
+    tokenizer=tokenizer,
+    max_new_tokens = 1000,
+    device=device,
+    eos_token_id=tokenizer.eos_token_id
+)
 
 llamaPipe = pipeline(
     "text-generation",
@@ -103,29 +114,13 @@ llamaPipe = pipeline(
 
 llamaPipe.model.to(torch.float32)
 
-# with torch.no_grad():
-#     outputs = llamaPipe.model.generate(
-#         input_ids,
-#         attention_mask=attention_mask,
-#         max_new_tokens=10,
-#         temperature=0.7,
-#         top_p=0.9,
-#         num_return_sequences=1,
-#         pad_token_id=tokenizer.pad_token_id,
-#         eos_token_id=tokenizer.eos_token_id
-#     )
-    
-# generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-# print("standard Llama ", generated_text)
-
-
 def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=5):
     model = model.cpu()
     base_input_ids = input_ids.cpu()
     base_attention_mask = attention_mask.cpu()
     
     print(f"\nModel type: {type(model)}")
-    print(f"Model config: {model.config}")
+    # print(f"Model config: {model.config}")
     print(f"Model dtype: {next(model.parameters()).dtype}")
     
     times = []
@@ -175,6 +170,23 @@ def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=5):
             model._past_length = 0
             model.config.use_cache = False
             
+            # Warmup iteration for more accurate timing
+            if i == 0:
+                with torch.no_grad():
+                    _ = model.generate(
+                        input_ids,
+                        attention_mask=attention_mask,
+                        max_new_tokens=1,
+                        temperature=0.7,
+                        top_p=0.9,
+                        num_return_sequences=1,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        use_cache=False,
+                        return_dict_in_generate=False
+                    )
+                continue
+            
             start = time.perf_counter()
             
             with torch.no_grad():
@@ -223,18 +235,18 @@ print("-" * 50)
 
 # Warm up runs
 print("Warming up models...")
-_ = run_inference(llamaSkipPipe.model, input_ids, attention_mask, tokenizer, num_runs=15)
-_ = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer, num_runs=15)
+_ = run_inference(llamaSkipScriptedPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
+_ = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
 
 # Actual benchmarks
-skip_times = run_inference(llamaSkipPipe.model, input_ids, attention_mask, tokenizer)
+skip_scripted_times = run_inference(llamaSkipScriptedPipe.model, input_ids, attention_mask, tokenizer)
 std_times = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer)
 
-print("\nSkipLLaMA CPU Results:")
-print(f"Average time: {sum(skip_times)/len(skip_times):.3f}s")
-print(f"Min time: {min(skip_times):.3f}s")
-print(f"Max time: {max(skip_times):.3f}s")
-print(f"Individual times: {[f'{t:.3f}s' for t in skip_times]}")
+print("\nSkipLLaMA Scripted CPU Results:")
+print(f"Average time: {sum(skip_scripted_times)/len(skip_scripted_times):.3f}s")
+print(f"Min time: {min(skip_scripted_times):.3f}s")
+print(f"Max time: {max(skip_scripted_times):.3f}s")
+print(f"Individual times: {[f'{t:.3f}s' for t in skip_scripted_times]}")
 
 print("\nStandard LLaMA CPU Results:")
 print(f"Average time: {sum(std_times)/len(std_times):.3f}s")
@@ -242,5 +254,5 @@ print(f"Min time: {min(std_times):.3f}s")
 print(f"Max time: {max(std_times):.3f}s")
 print(f"Individual times: {[f'{t:.3f}s' for t in std_times]}")
 
-print("\nCPU Speedup:")
-print(f"Average speedup: {(sum(std_times)/len(std_times))/(sum(skip_times)/len(skip_times)):.2f}x")
+print("\nCPU Speedups:")
+print(f"Scripted vs Standard: {(sum(std_times)/len(std_times))/(sum(skip_scripted_times)/len(skip_scripted_times)):.2f}x")
