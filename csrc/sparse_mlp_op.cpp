@@ -144,31 +144,29 @@ void sparse_mlp_forward_cpu_impl(
     torch::Tensor& output,
     BufferPool* buffer_pool) {
     
-    Timer total_timer("total_forward");
-    Timer batch_timer("batch");
-    Timer mask_timer("mask_indices");
-    Timer proj_timer("projections");
-    Timer matmul_timer("matmul");
-    Timer act_timer("activation");
-    Timer down_timer("down_proj");
-    
-    total_timer.start();
-    
-    TORCH_CHECK(buffer_pool != nullptr, "Buffer pool is null");
+    // Timer total_timer("total_forward");
+    // total_timer.start();
+
     auto batch_size = input.size(0);
+    // std::vector<double> thread_times(omp_get_max_threads(), 0.0);
     
     #pragma omp parallel for
     for (int64_t i = 0; i < batch_size; i++) {
         int thread_id = omp_get_thread_num();
+        // auto thread_start = std::chrono::high_resolution_clock::now();
         
         try {
-            batch_timer.start();
-            mask_timer.start();
             auto mask_indices = mask.select(0, i).nonzero().squeeze(-1);
-            mask_timer.stop();
             
             if (mask_indices.numel() > 0) {
-                proj_timer.start();
+                // Timer proj_timer(("proj_" + std::to_string(thread_id)).c_str());
+                // Timer matmul_timer(("matmul_" + std::to_string(thread_id)).c_str());
+                // Timer act_timer(("act_" + std::to_string(thread_id)).c_str());
+                // Timer down_timer(("down_" + std::to_string(thread_id)).c_str());
+                // Timer down_index_timer(("down_index_" + std::to_string(thread_id)).c_str());
+                // Timer down_matmul_timer(("down_matmul_" + std::to_string(thread_id)).c_str());
+
+                // proj_timer.start();
                 auto batch_input = input.select(0, i);
                 auto& gate_proj_view = buffer_pool->get_gate_proj(thread_id);
                 auto& up_proj_view = buffer_pool->get_up_proj(thread_id);
@@ -184,14 +182,14 @@ void sparse_mlp_forward_cpu_impl(
                                                   .narrow(1, 0, up_weight_masked.size(1));
                 auto activated_view_narrow = activated_view.narrow(0, 0, batch_input_view.size(0))
                                                        .narrow(1, 0, gate_weight_masked.size(1));
-                proj_timer.stop();
+                // proj_timer.stop();
                 
-                matmul_timer.start();
+                // matmul_timer.start();
                 torch::matmul_out(gate_proj_view_narrow, batch_input_view, gate_weight_masked);
                 torch::matmul_out(up_proj_view_narrow, batch_input_view, up_weight_masked);
-                matmul_timer.stop();
+                // matmul_timer.stop();
 
-                act_timer.start();
+                // act_timer.start();
                 if (activation_fn == "silu") {
                     activated_view_narrow.copy_(gate_proj_view_narrow);
                     activated_view_narrow.sigmoid_().mul_(gate_proj_view_narrow).mul_(up_proj_view_narrow);
@@ -204,36 +202,37 @@ void sparse_mlp_forward_cpu_impl(
                     activated_view_narrow.mul_(gate_proj_view_narrow);
                     activated_view_narrow.mul_(up_proj_view_narrow);
                 }
-                act_timer.stop();
+                // act_timer.stop();
 
-                down_timer.start();
-
-                Timer index_timer("down_index");
-                index_timer.start();
+                // down_timer.start();
+                // down_index_timer.start();
                 auto down_weight_masked = down_weight.index_select(1, mask_indices);
-                index_timer.stop();
+                // down_index_timer.stop();
 
-                Timer transpose_timer("down_transpose"); 
-                transpose_timer.start();
                 down_weight_masked = down_weight_masked.contiguous().t().detach();
-                transpose_timer.stop();
 
-                Timer matmul_timer("down_matmul");
-                matmul_timer.start();
+                // down_matmul_timer.start();
                 auto output_view = output.select(0, i).view({1, -1}).detach();
                 torch::matmul_out(output_view, activated_view_narrow, down_weight_masked);
-                matmul_timer.stop();
-
-                down_timer.stop();
+                // down_matmul_timer.stop();
+                // down_timer.stop();
             } else {
                 output.select(0, i).zero_();
             }
-            batch_timer.stop();
         } catch (const std::exception& e) {
             throw std::runtime_error("Error in batch " + std::to_string(i) + ", thread " + std::to_string(thread_id) + ": " + e.what());
         }
+        
+        // auto thread_end = std::chrono::high_resolution_clock::now();
+        // thread_times[thread_id] += std::chrono::duration<double, std::milli>(thread_end - thread_start).count();
     }
-    total_timer.stop();
+    
+    // Print thread statistics
+    // for (int i = 0; i < omp_get_max_threads(); i++) {
+    //     fprintf(stderr, "Thread %d total time: %.3f ms\n", i, thread_times[i]);
+    // }
+    
+    // total_timer.stop();
 }
 }  // namespace
 
