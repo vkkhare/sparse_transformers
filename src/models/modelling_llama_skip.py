@@ -99,11 +99,11 @@ class LlamaSkipMLP(nn.Module):
         self.buffer_pool = sparse_mlp.BufferPoolHandle(self.hidden_size, self.intermediate_size)
         
     def forward(self, x):
-        # start_time = time.perf_counter()
+        start_time = time.perf_counter()
         
         # 1. Reshape
         unsqueezeX = x.view(-1, x.shape[-1])
-        # reshape_time = time.perf_counter()
+        reshape_time = time.perf_counter()
         
         # 2. LoRA projection and mask
         proj = self.lora_gate_proj(unsqueezeX)
@@ -115,7 +115,7 @@ class LlamaSkipMLP(nn.Module):
         # In-place mask application
         torch.mul(proj, self.mask, out=self.masked_output)
         mask = self.masked_output.to(torch.bool)  # Convert to bool after multiplication
-        # mask_time = time.perf_counter()
+        mask_time = time.perf_counter()
         
         # 3. Sparse MLP (needs buffer_pool)
         act_fn_name = "silu" if isinstance(self.act_fn, nn.SiLU) else "gelu"
@@ -128,19 +128,19 @@ class LlamaSkipMLP(nn.Module):
             act_fn_name,
             self.buffer_pool  # Keep using buffer_pool
         )
-        # mlp_time = time.perf_counter()
+        mlp_time = time.perf_counter()
         
         # 4. Bias
         if self.config.mlp_bias:
             down_proj += self.down_proj.bias
-        # end_time = time.perf_counter()
+        end_time = time.perf_counter()
         
-        # print(f"\nMLP Operation Breakdown:")
-        # print(f"Reshape: {(reshape_time - start_time)*1000:.2f}ms")
-        # print(f"LoRA + Mask: {(mask_time - reshape_time)*1000:.2f}ms")
-        # print(f"Sparse MLP: {(mlp_time - mask_time)*1000:.2f}ms")
-        # print(f"Bias: {(end_time - mlp_time)*1000:.2f}ms")
-        # print(f"Total: {(end_time - start_time)*1000:.2f}ms")
+        print(f"\nMLP Operation Breakdown:")
+        print(f"Reshape: {(reshape_time - start_time)*1000:.2f}ms")
+        print(f"LoRA + Mask: {(mask_time - reshape_time)*1000:.2f}ms")
+        print(f"Sparse MLP: {(mlp_time - mask_time)*1000:.2f}ms")
+        print(f"Bias: {(end_time - mlp_time)*1000:.2f}ms")
+        print(f"Total: {(end_time - start_time)*1000:.2f}ms")
         
         return down_proj
 
