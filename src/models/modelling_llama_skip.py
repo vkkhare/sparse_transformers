@@ -27,9 +27,45 @@ from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin
 from sparse_mlp import sparse_mlp_forward
 import sparse_mlp
+import time
 logger = logging.get_logger(__name__)
 
 from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
+
+class FastLoRAProjection(nn.Module):
+    def __init__(self, hidden_size, intermediate_size, lora_size, bias=False):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.lora_size = lora_size
+        
+        self.down = nn.Linear(hidden_size, lora_size, bias=bias)
+        self.up = nn.Linear(lora_size, intermediate_size, bias=bias)
+        
+        # Pre-allocate all buffers
+        self.register_buffer('intermediate', torch.empty(0))
+        self.register_buffer('output', torch.empty(0))
+        
+    def forward(self, x):
+        batch_size = x.size(0)
+        # Resize buffers if needed
+        if self.intermediate.size(0) != batch_size:
+            self.intermediate = torch.empty(batch_size, self.lora_size, 
+                                         dtype=x.dtype, device=x.device)
+            self.output = torch.empty(batch_size, self.intermediate_size,
+                                    dtype=x.dtype, device=x.device)
+            
+        # Fused operations
+        torch.mm(x, self.down.weight.t(), out=self.intermediate)
+        if self.down.bias is not None:
+            self.intermediate.add_(self.down.bias)
+            
+        # Use pre-allocated output buffer
+        torch.mm(self.intermediate, self.up.weight.t(), out=self.output)
+        if self.up.bias is not None:
+            self.output.add_(self.up.bias)
+            
+        return self.output
 
 class LlamaSkipMLP(nn.Module):
 
@@ -38,27 +74,50 @@ class LlamaSkipMLP(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.lora_size = int(config.intermediate_size * 0.2)
+        self.lora_size = int(config.intermediate_size * 0.04)
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
         self.act_fn = ACT2FN[config.hidden_act]
-        self.lora_gate_proj = nn.Sequential(
-            nn.Linear(self.hidden_size,self.lora_size, bias=config.mlp_bias),
-            nn.Linear(self.lora_size,self.intermediate_size, bias=config.mlp_bias)
-        )
+        self.lora_gate_proj = FastLoRAProjection(self.hidden_size, self.intermediate_size, 
+                                                self.lora_size, bias=config.mlp_bias)
         self.sparsity = 0.2
-        mask = torch.zeros(config.intermediate_size)
-        mask[:int(config.intermediate_size * self.sparsity)] = 1
+        
+        # Pre-convert mask to bool
+        mask = torch.zeros(
+            (config.intermediate_size,),
+            dtype=torch.bool,
+            device=self.gate_proj.weight.device
+        ).contiguous()
+        mask[:int(config.intermediate_size * self.sparsity)] = True
         self.register_buffer('mask', mask)
-
-        # Create instance-specific buffer pool
+        
+        # Pre-allocate masked output buffer
+        self.register_buffer('masked_output', torch.empty(0))
+        
+        # Keep buffer pool for sparse_mlp_forward
         self.buffer_pool = sparse_mlp.BufferPoolHandle(self.hidden_size, self.intermediate_size)
         
     def forward(self, x):
-        unsqueezeX = x.view(-1, x.shape[-1])
-        mask = (self.lora_gate_proj(unsqueezeX) * self.mask).to(torch.bool)
+        # start_time = time.perf_counter()
         
+        # 1. Reshape
+        unsqueezeX = x.view(-1, x.shape[-1])
+        # reshape_time = time.perf_counter()
+        
+        # 2. LoRA projection and mask
+        proj = self.lora_gate_proj(unsqueezeX)
+        
+        # Use pre-allocated buffer for masked output
+        if self.masked_output.size(0) != proj.size(0):
+            self.masked_output = torch.empty_like(proj)
+            
+        # In-place mask application
+        torch.mul(proj, self.mask, out=self.masked_output)
+        mask = self.masked_output.to(torch.bool)  # Convert to bool after multiplication
+        # mask_time = time.perf_counter()
+        
+        # 3. Sparse MLP (needs buffer_pool)
         act_fn_name = "silu" if isinstance(self.act_fn, nn.SiLU) else "gelu"
         down_proj = sparse_mlp.sparse_mlp_forward(
             unsqueezeX,
@@ -67,11 +126,22 @@ class LlamaSkipMLP(nn.Module):
             self.down_proj.weight,
             mask,
             act_fn_name,
-            self.buffer_pool
+            self.buffer_pool  # Keep using buffer_pool
         )
+        # mlp_time = time.perf_counter()
         
+        # 4. Bias
         if self.config.mlp_bias:
             down_proj += self.down_proj.bias
+        # end_time = time.perf_counter()
+        
+        # print(f"\nMLP Operation Breakdown:")
+        # print(f"Reshape: {(reshape_time - start_time)*1000:.2f}ms")
+        # print(f"LoRA + Mask: {(mask_time - reshape_time)*1000:.2f}ms")
+        # print(f"Sparse MLP: {(mlp_time - mask_time)*1000:.2f}ms")
+        # print(f"Bias: {(end_time - mlp_time)*1000:.2f}ms")
+        # print(f"Total: {(end_time - start_time)*1000:.2f}ms")
+        
         return down_proj
 
 class LlamaSkipDecoderLayer(LlamaDecoderLayer):

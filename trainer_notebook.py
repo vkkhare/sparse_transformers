@@ -223,8 +223,8 @@ print("-" * 50)
 
 # Warm up runs
 print("Warming up models...")
-_ = run_inference(llamaSkipPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
-_ = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
+_ = run_inference(llamaSkipPipe.model, input_ids, attention_mask, tokenizer, num_runs=15)
+_ = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer, num_runs=15)
 
 # Actual benchmarks
 skip_times = run_inference(llamaSkipPipe.model, input_ids, attention_mask, tokenizer)
