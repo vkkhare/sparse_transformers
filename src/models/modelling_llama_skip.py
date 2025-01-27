@@ -40,8 +40,8 @@ def sparse_mlp_script(x: torch.Tensor,
                      mask: torch.Tensor,
                      act_fn_name: str) -> torch.Tensor:
     """TorchScript compatible wrapper for sparse_mlp_forward"""
-    # Call the registered operator
-    return sparse_mlp_forward(x, gate_weight, up_weight, down_weight, mask, act_fn_name)
+    # Call the registered operator with detached inputs
+    return sparse_mlp_forward(x.detach(), gate_weight.detach(), up_weight.detach(), down_weight.detach(), mask.detach(), act_fn_name)
 
 class FastLoRAProjection(nn.Module):
     def __init__(self, hidden_size, intermediate_size, lora_size, bias=False):

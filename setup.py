@@ -18,6 +18,43 @@ os.environ['TORCH_BUILD_DIR'] = str(build_dir)
 os.environ['BUILD_LIB'] = str(build_dir / 'lib')
 os.environ['BUILD_TEMP'] = str(build_dir / 'temp')
 
+# Get CUDA compute capability if GPU is available
+arch_flags = []
+if torch.cuda.is_available():
+    arch_list = []
+    for i in range(torch.cuda.device_count()):
+        arch_list.append(torch.cuda.get_device_capability(i))
+    arch_list = sorted(list(set(arch_list)))
+    arch_flags = [f"-gencode=arch=compute_{arch[0]}{arch[1]},code=sm_{arch[0]}{arch[1]}" for arch in arch_list]
+
+# Optimization flags
+extra_compile_args = [
+    '-O3',                      # Maximum optimization
+    '-march=native',            # Optimize for local CPU architecture
+    '-ffast-math',              # Aggressive floating point optimizations
+    '-fopenmp',                 # OpenMP support
+    '-fno-plt',                 # Improve indirect call performance
+    '-flto',                    # Link-time optimization
+    '-fuse-linker-plugin',      # Enable LTO plugin
+    '-funroll-loops',           # Unroll loops
+    '-fomit-frame-pointer',     # Remove frame pointers
+    '-fno-stack-protector',     # Disable stack protector
+    '-fno-math-errno',          # Assume math functions never set errno
+    '-fno-trapping-math',       # Assume FP ops don't generate traps
+    '-mtune=native',            # Tune code for local CPU
+    '-mavx2',                   # Enable AVX2 instructions if available
+    '-mfma',                    # Enable FMA instructions if available
+]
+
+# Link flags
+extra_link_args = [
+    '-fopenmp',
+    '-flto',                    # Link-time optimization
+    '-fuse-linker-plugin',      # Enable LTO plugin
+    '-Wl,--as-needed',          # Only link needed libraries
+    '-Wl,-O3',                  # Linker optimizations
+]
+
 class CustomBuildExtension(BuildExtension):
     def get_ext_filename(self, ext_name):
         # Force output to build directory
@@ -36,9 +73,8 @@ setup(
         CppExtension(
             name='sparse_mlp',
             sources=['sparse_mlp/csrc/sparse_mlp_op.cpp'],
-            extra_compile_args={
-                'cxx': ['-O3', '-ffast-math', '-march=native', '-fopenmp'],
-            },
+            extra_compile_args=extra_compile_args,
+            extra_link_args=extra_link_args,
             libraries=['gomp'],
             include_dirs=[
                 # Main PyTorch include directory
