@@ -85,11 +85,13 @@ torch::Tensor sparse_mlp_forward(
             auto gate_act = activated * up_proj;
 
             torch::matmul_out(out_proj, gate_act, active_down_weight);
-            
+            std::cout << "out matmul done for batch " << i << std::endl;
             #pragma omp critical
             {
                 down_proj[i].copy_(out_proj[0].detach());  // Only one copy at the end
             }            
+            std::cout << "copy done for batch " << i << std::endl;
+
         }
     }
     omp_set_nested(0);
