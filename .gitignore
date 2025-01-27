@@ -82,7 +82,6 @@ coverage.xml
 .hypothesis/
 
 # Logs and databases
-*.log
 *.sqlite
 *.db
 

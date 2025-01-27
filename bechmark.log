@@ -1,0 +1,50 @@
+Some weights of LlamaSkipConnectionForCausalLM were not initialized from the model checkpoint at meta-llama/Llama-3.2-1B-Instruct and are newly initialized: ['model.layers.0.mlp.lora_gate_proj.down.weight', 'model.layers.0.mlp.lora_gate_proj.intermediate', 'model.layers.0.mlp.lora_gate_proj.output', 'model.layers.0.mlp.lora_gate_proj.up.weight', 'model.layers.0.mlp.mask', 'model.layers.0.mlp.masked_output', 'model.layers.1.mlp.lora_gate_proj.down.weight', 'model.layers.1.mlp.lora_gate_proj.intermediate', 'model.layers.1.mlp.lora_gate_proj.output', 'model.layers.1.mlp.lora_gate_proj.up.weight', 'model.layers.1.mlp.mask', 'model.layers.1.mlp.masked_output', 'model.layers.10.mlp.lora_gate_proj.down.weight', 'model.layers.10.mlp.lora_gate_proj.intermediate', 'model.layers.10.mlp.lora_gate_proj.output', 'model.layers.10.mlp.lora_gate_proj.up.weight', 'model.layers.10.mlp.mask', 'model.layers.10.mlp.masked_output', 'model.layers.11.mlp.lora_gate_proj.down.weight', 'model.layers.11.mlp.lora_gate_proj.intermediate', 'model.layers.11.mlp.lora_gate_proj.output', 'model.layers.11.mlp.lora_gate_proj.up.weight', 'model.layers.11.mlp.mask', 'model.layers.11.mlp.masked_output', 'model.layers.12.mlp.lora_gate_proj.down.weight', 'model.layers.12.mlp.lora_gate_proj.intermediate', 'model.layers.12.mlp.lora_gate_proj.output', 'model.layers.12.mlp.lora_gate_proj.up.weight', 'model.layers.12.mlp.mask', 'model.layers.12.mlp.masked_output', 'model.layers.13.mlp.lora_gate_proj.down.weight', 'model.layers.13.mlp.lora_gate_proj.intermediate', 'model.layers.13.mlp.lora_gate_proj.output', 'model.layers.13.mlp.lora_gate_proj.up.weight', 'model.layers.13.mlp.mask', 'model.layers.13.mlp.masked_output', 'model.layers.14.mlp.lora_gate_proj.down.weight', 'model.layers.14.mlp.lora_gate_proj.intermediate', 'model.layers.14.mlp.lora_gate_proj.output', 'model.layers.14.mlp.lora_gate_proj.up.weight', 'model.layers.14.mlp.mask', 'model.layers.14.mlp.masked_output', 'model.layers.15.mlp.lora_gate_proj.down.weight', 'model.layers.15.mlp.lora_gate_proj.intermediate', 'model.layers.15.mlp.lora_gate_proj.output', 'model.layers.15.mlp.lora_gate_proj.up.weight', 'model.layers.15.mlp.mask', 'model.layers.15.mlp.masked_output', 'model.layers.2.mlp.lora_gate_proj.down.weight', 'model.layers.2.mlp.lora_gate_proj.intermediate', 'model.layers.2.mlp.lora_gate_proj.output', 'model.layers.2.mlp.lora_gate_proj.up.weight', 'model.layers.2.mlp.mask', 'model.layers.2.mlp.masked_output', 'model.layers.3.mlp.lora_gate_proj.down.weight', 'model.layers.3.mlp.lora_gate_proj.intermediate', 'model.layers.3.mlp.lora_gate_proj.output', 'model.layers.3.mlp.lora_gate_proj.up.weight', 'model.layers.3.mlp.mask', 'model.layers.3.mlp.masked_output', 'model.layers.4.mlp.lora_gate_proj.down.weight', 'model.layers.4.mlp.lora_gate_proj.intermediate', 'model.layers.4.mlp.lora_gate_proj.output', 'model.layers.4.mlp.lora_gate_proj.up.weight', 'model.layers.4.mlp.mask', 'model.layers.4.mlp.masked_output', 'model.layers.5.mlp.lora_gate_proj.down.weight', 'model.layers.5.mlp.lora_gate_proj.intermediate', 'model.layers.5.mlp.lora_gate_proj.output', 'model.layers.5.mlp.lora_gate_proj.up.weight', 'model.layers.5.mlp.mask', 'model.layers.5.mlp.masked_output', 'model.layers.6.mlp.lora_gate_proj.down.weight', 'model.layers.6.mlp.lora_gate_proj.intermediate', 'model.layers.6.mlp.lora_gate_proj.output', 'model.layers.6.mlp.lora_gate_proj.up.weight', 'model.layers.6.mlp.mask', 'model.layers.6.mlp.masked_output', 'model.layers.7.mlp.lora_gate_proj.down.weight', 'model.layers.7.mlp.lora_gate_proj.intermediate', 'model.layers.7.mlp.lora_gate_proj.output', 'model.layers.7.mlp.lora_gate_proj.up.weight', 'model.layers.7.mlp.mask', 'model.layers.7.mlp.masked_output', 'model.layers.8.mlp.lora_gate_proj.down.weight', 'model.layers.8.mlp.lora_gate_proj.intermediate', 'model.layers.8.mlp.lora_gate_proj.output', 'model.layers.8.mlp.lora_gate_proj.up.weight', 'model.layers.8.mlp.mask', 'model.layers.8.mlp.masked_output', 'model.layers.9.mlp.lora_gate_proj.down.weight', 'model.layers.9.mlp.lora_gate_proj.intermediate', 'model.layers.9.mlp.lora_gate_proj.output', 'model.layers.9.mlp.lora_gate_proj.up.weight', 'model.layers.9.mlp.mask', 'model.layers.9.mlp.masked_output']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+Configuring for 8 CPU threads
+Model device: cpu
+Input IDs device: cpu
+Attention Mask device: cpu
+Running CPU inference benchmarks...
+--------------------------------------------------
+Warming up models...
+
+Model type: <class 'src.models.modelling_llama_skip.LlamaSkipConnectionForCausalLM'>
+Model dtype: torch.float32
+
+Model type: <class 'transformers.models.llama.modeling_llama.LlamaForCausalLM'>
+Model dtype: torch.float32
+
+Model type: <class 'src.models.modelling_llama_skip.LlamaSkipConnectionForCausalLM'>
+Model dtype: torch.float32
+
+Model type: <class 'src.models.modelling_llama_skip.LlamaSkipConnectionForCausalLM'>
+Model dtype: torch.float32
+
+Model type: <class 'transformers.models.llama.modeling_llama.LlamaForCausalLM'>
+Model dtype: torch.float32
+
+Model type: <class 'src.models.modelling_llama_skip.LlamaSkipConnectionForCausalLM'>
+Model dtype: torch.float32
+
+SkipLLaMA Scripted CPU Results:
+Average time: 0.923s
+Min time: 0.915s
+Max time: 0.940s
+Individual times: ['0.916s', '0.940s', '0.918s', '0.915s']
+
+Standard LLaMA CPU Results:
+Average time: 0.499s
+Min time: 0.498s
+Max time: 0.500s
+Individual times: ['0.500s', '0.498s', '0.499s', '0.499s']
+
+SkipLLaMA CPU Results:
+Average time: 1.920s
+Min time: 0.936s
+Max time: 3.888s
+Individual times: ['0.936s', '3.888s', '1.776s', '1.080s']
+
+CPU Speedups:
+Scripted vs Standard: 0.54x
+SkipLLaMA vs Standard: 0.26x
+SkipLLaMA vs Scripted: 2.08x

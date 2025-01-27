@@ -4,7 +4,6 @@ import torch
 from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
 from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection
 from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
-from transformers.models.llama import LlamaForCausalLM
 import gc
 import time
 
@@ -38,8 +37,7 @@ config = LlamaSkipConnectionConfig.from_pretrained(model_id)
 # Load model without device_map
 model = LlamaSkipConnectionForCausalLM.from_pretrained(
     checkpoint, 
-    config=config,
-    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+    config=config
 ).to(device)
 
 # Move all masks to the correct device
@@ -81,14 +79,14 @@ print(f"Input IDs device: {input_ids.device}")
 print(f"Attention Mask device: {attention_mask.device}")
 
 # Create pipelines for each model variant
-# llamaSkipPipe = pipeline(
-#     "text-generation",
-#     model=model,
-#     tokenizer=tokenizer,
-#     max_new_tokens = 1000,
-#     device=device,
-#     eos_token_id=tokenizer.eos_token_id
-# )
+llamaSkipPipe = pipeline(
+    "text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    max_new_tokens = 1000,
+    device=device,
+    eos_token_id=tokenizer.eos_token_id
+)
 # messages = [
 #     {"role": "system", "content": "You are a pirate chatbot who always responds in pirate speak!"},
 #     {"role": "user", "content": "Who are you?"},
@@ -113,6 +111,8 @@ llamaPipe = pipeline(
 )
 
 llamaPipe.model.to(torch.float32)
+llamaSkipPipe.model.to(torch.float32)
+llamaSkipScriptedPipe.model.to(torch.float32)
 
 def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=5):
     model = model.cpu()
@@ -124,73 +124,25 @@ def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=5):
     print(f"Model dtype: {next(model.parameters()).dtype}")
     
     times = []
-    mlp_times = {i: [] for i in range(16)}
     
-    # Store original forward methods
-    original_forwards = {}
-    
-    def wrap_forward(module, layer_idx):
-        original_forward = module.forward
+    for i in range(num_runs):
+        torch.cuda.empty_cache()
+        gc.collect()
         
-        def timed_forward(*args, **kwargs):
-            start = time.perf_counter()
-            result = original_forward(*args, **kwargs)
-            end = time.perf_counter()
-            mlp_times[layer_idx].append(end - start)
-            return result
-            
-        return timed_forward
-    
-    # Register wrapped forwards
-    if isinstance(model, LlamaSkipConnectionForCausalLM):
-        for i, layer in enumerate(model.model.layers):
-            if hasattr(layer, 'mlp'):
-                original_forwards[i] = layer.mlp.forward
-                layer.mlp.forward = wrap_forward(layer.mlp, i)
-    elif isinstance(model, LlamaForCausalLM):
-        for i, layer in enumerate(model.model.layers):
-            if hasattr(layer, 'mlp'):
-                original_forwards[i] = layer.mlp.forward
-                layer.mlp.forward = wrap_forward(layer.mlp, i)
-    
-    print(f"Wrapped {len(original_forwards)} MLP forwards")
-    
-    try:
-        for i in range(num_runs):
-            torch.cuda.empty_cache()
-            gc.collect()
-            
-            # Randomize input for each run
-            random_shift = torch.randint(-100, 100, base_input_ids.shape)
-            input_ids = torch.clamp(base_input_ids + random_shift, min=0, max=tokenizer.vocab_size-1)
-            attention_mask = base_attention_mask  # Keep attention mask same
-            
-            if hasattr(model, 'past_key_values'):
-                model.past_key_values = None
-            model._past_length = 0
-            model.config.use_cache = False
-            
-            # Warmup iteration for more accurate timing
-            if i == 0:
-                with torch.no_grad():
-                    _ = model.generate(
-                        input_ids,
-                        attention_mask=attention_mask,
-                        max_new_tokens=1,
-                        temperature=0.7,
-                        top_p=0.9,
-                        num_return_sequences=1,
-                        pad_token_id=tokenizer.pad_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
-                        use_cache=False,
-                        return_dict_in_generate=False
-                    )
-                continue
-            
-            start = time.perf_counter()
-            
+        # Randomize input for each run
+        random_shift = torch.randint(-100, 100, base_input_ids.shape)
+        input_ids = torch.clamp(base_input_ids + random_shift, min=0, max=tokenizer.vocab_size-1)
+        attention_mask = base_attention_mask  # Keep attention mask same
+        
+        if hasattr(model, 'past_key_values'):
+            model.past_key_values = None
+        model._past_length = 0
+        model.config.use_cache = False
+        
+        # Warmup iteration for more accurate timing
+        if i == 0:
             with torch.no_grad():
-                outputs = model.generate(
+                _ = model.generate(
                     input_ids,
                     attention_mask=attention_mask,
                     max_new_tokens=1,
@@ -202,32 +154,26 @@ def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=5):
                     use_cache=False,
                     return_dict_in_generate=False
                 )
-                
-            end = time.perf_counter()
-            times.append(end - start)
+            continue
+        
+        start = time.perf_counter()
+        
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=1,
+                temperature=0.7,
+                top_p=0.9,
+                num_return_sequences=1,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                use_cache=False,
+                return_dict_in_generate=False
+            )
             
-            print(f"Run {i} output length: {len(outputs[0])}")
-    finally:
-        # Restore original forwards
-        if isinstance(model, LlamaSkipConnectionForCausalLM):
-            for i, layer in enumerate(model.model.layers):
-                if i in original_forwards:
-                    layer.mlp.forward = original_forwards[i]
-        elif isinstance(model, LlamaForCausalLM):
-            for i, layer in enumerate(model.model.layers):
-                if i in original_forwards:
-                    layer.mlp.forward = original_forwards[i]
-    
-    # Print MLP timing statistics
-    if mlp_times[0]:
-        print("\nMLP timing statistics:")
-        for layer_idx, timings in mlp_times.items():
-            if timings:
-                avg_time = sum(timings) / len(timings)
-                min_time = min(timings)
-                max_time = max(timings)
-                print(f"Layer {layer_idx} MLP: avg={avg_time:.3f}s, min={min_time:.3f}s, max={max_time:.3f}s")
-    
+        end = time.perf_counter()
+        times.append(end - start)    
     return times
 
 print("Running CPU inference benchmarks...")
@@ -237,22 +183,27 @@ print("-" * 50)
 print("Warming up models...")
 _ = run_inference(llamaSkipScriptedPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
 _ = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
+_ = run_inference(llamaSkipPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
 
 # Actual benchmarks
 skip_scripted_times = run_inference(llamaSkipScriptedPipe.model, input_ids, attention_mask, tokenizer)
 std_times = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer)
+skip_times = run_inference(llamaSkipPipe.model, input_ids, attention_mask, tokenizer)
 
-print("\nSkipLLaMA Scripted CPU Results:")
-print(f"Average time: {sum(skip_scripted_times)/len(skip_scripted_times):.3f}s")
-print(f"Min time: {min(skip_scripted_times):.3f}s")
-print(f"Max time: {max(skip_scripted_times):.3f}s")
-print(f"Individual times: {[f'{t:.3f}s' for t in skip_scripted_times]}")
+print_results = lambda name, times: (
+    print(f"\n{name} CPU Results:"),
+    print(f"Average time: {sum(times)/len(times):.3f}s"),
+    print(f"Min time: {min(times):.3f}s"), 
+    print(f"Max time: {max(times):.3f}s"),
+    print(f"Individual times: {[f'{t:.3f}s' for t in times]}")
+)
 
-print("\nStandard LLaMA CPU Results:")
-print(f"Average time: {sum(std_times)/len(std_times):.3f}s")
-print(f"Min time: {min(std_times):.3f}s")
-print(f"Max time: {max(std_times):.3f}s")
-print(f"Individual times: {[f'{t:.3f}s' for t in std_times]}")
+calc_speedup = lambda t1, t2: (sum(t1)/len(t1))/(sum(t2)/len(t2))
 
+print_results("SkipLLaMA Scripted", skip_scripted_times)
+print_results("Standard LLaMA", std_times)
+print_results("SkipLLaMA", skip_times)
 print("\nCPU Speedups:")
-print(f"Scripted vs Standard: {(sum(std_times)/len(std_times))/(sum(skip_scripted_times)/len(skip_scripted_times)):.2f}x")
+print(f"Scripted vs Standard: {calc_speedup(std_times, skip_scripted_times):.2f}x")
+print(f"SkipLLaMA vs Standard: {calc_speedup(std_times, skip_times):.2f}x")
+print(f"SkipLLaMA vs Scripted: {calc_speedup(skip_times, skip_scripted_times):.2f}x")

@@ -27,6 +27,7 @@ from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin
 import torch.utils.cpp_extension
 from sparse_mlp import sparse_mlp_forward
+import time
 
 logger = logging.get_logger(__name__)
 
@@ -66,19 +67,18 @@ class FastLoRAProjection(nn.Module):
     
     def forward(self, x):
         batch_size = x.size(0)
-        # Resize buffers if needed
         self._resize_buffers(batch_size, x.dtype, x.device)
-            
-        # Fused operations with TorchScript optimization
+        
+        # Down projection
         torch.mm(x, self.down.weight.t(), out=self.intermediate)
         if self.down.bias is not None:
             self.intermediate.add_(self.down.bias)
-            
-        # Use pre-allocated output buffer
+        
+        # Up projection
         torch.mm(self.intermediate, self.up.weight.t(), out=self.output)
         if self.up.bias is not None:
             self.output.add_(self.up.bias)
-            
+        
         return self.output
 
 class LlamaSkipMLP(nn.Module):
@@ -112,23 +112,23 @@ class LlamaSkipMLP(nn.Module):
         # Pre-allocate masked output buffer with initial size
         self.register_buffer('masked_output', torch.empty(1, self.intermediate_size))
     
+    def _resize_buffers(self, batch_size: int, dtype: torch.dtype):
+        """Resize buffers if needed"""
+        if self.masked_output.size(0) != batch_size:
+            # Resize with zero elements first to avoid warning
+            self.masked_output.resize_(0)
+            # Then resize to actual size
+            self.masked_output.resize_(batch_size, self.intermediate_size)
+            self.masked_output = self.masked_output.to(dtype=dtype)
+    
     def forward(self, x):
-        # 1. Reshape with TorchScript optimization
         unsqueezeX = x.view(-1, x.shape[-1])
         
-        # 2. LoRA projection and mask
         proj = self.lora_gate_proj(unsqueezeX)
-        
-        # Resize masked output buffer if needed
-        if self.masked_output.size(0) != proj.size(0):
-            self.masked_output.resize_(proj.size(0), self.intermediate_size)
-            self.masked_output = self.masked_output.to(proj.dtype)
-            
-        # In-place mask application
+        self._resize_buffers(proj.size(0), proj.dtype)
         torch.mul(proj, self.mask, out=self.masked_output)
         mask = self.masked_output.to(torch.bool)
         
-        # 3. Call sparse MLP through TorchScript wrapper
         down_proj = sparse_mlp_script(
             unsqueezeX,
             self.gate_proj.weight,
@@ -138,7 +138,6 @@ class LlamaSkipMLP(nn.Module):
             "silu"
         )
         
-        # 4. Add bias if exists
         if self.down_proj.bias is not None:
             down_proj.add_(self.down_proj.bias)
         

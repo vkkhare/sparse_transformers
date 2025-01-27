@@ -44,6 +44,11 @@ extra_compile_args = [
     '-mtune=native',            # Tune code for local CPU
     '-mavx2',                   # Enable AVX2 instructions if available
     '-mfma',                    # Enable FMA instructions if available
+    '-s',                       # Strip all symbols
+    '-w',                       # Disable all warnings
+    '-fvisibility=hidden',      # Hide all symbols by default
+    '-fdata-sections',          # Place each data item into its own section
+    '-ffunction-sections',      # Place each function into its own section
 ]
 
 # Link flags
@@ -53,6 +58,9 @@ extra_link_args = [
     '-fuse-linker-plugin',      # Enable LTO plugin
     '-Wl,--as-needed',          # Only link needed libraries
     '-Wl,-O3',                  # Linker optimizations
+    '-Wl,--strip-all',          # Strip all symbols
+    '-Wl,--gc-sections',        # Remove unused sections
+    '-Wl,--exclude-libs,ALL',   # Don't export any symbols from libraries
 ]
 
 class CustomBuildExtension(BuildExtension):
