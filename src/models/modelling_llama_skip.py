@@ -1,7 +1,6 @@
 from transformers import PreTrainedModel
 from torch.nn import CrossEntropyLoss
 
-from transformers.activations import ACT2FN
 from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
     BaseModelOutputWithPast,
@@ -13,7 +12,7 @@ from transformers.utils import (
     logging
 )
 from transformers.models.llama.modeling_llama import(
-     LlamaRMSNorm, LlamaRotaryEmbedding, LlamaDecoderLayer, 
+     LlamaRMSNorm, LlamaRotaryEmbedding, LlamaDecoderLayer, LlamaAttention,
      LLAMA_INPUTS_DOCSTRING, _CONFIG_FOR_DOC, LLAMA_START_DOCSTRING
 )
 from typing import List, Optional, Tuple, Union
@@ -22,27 +21,27 @@ from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from torch import nn
 import torch
 import torch.nn.functional as F
-from typing import List
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.generation import GenerationMixin
 import torch.utils.cpp_extension
-from sparse_mlp import sparse_mlp_forward
-import time
 
-logger = logging.get_logger(__name__)
+# Import C++ extensions
+import torch
+from sparse_mlp import (
+    sparse_mlp_forward,
+    compute_active_weights
+)
+
 
 from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 
+logger = logging.get_logger(__name__)
+
 @torch.jit.script
-def sparse_mlp_script(x: torch.Tensor,
-                     gate_weight: torch.Tensor,
-                     up_weight: torch.Tensor,
-                     down_weight: torch.Tensor,
-                     mask: torch.Tensor,
-                     act_fn_name: str) -> torch.Tensor:
+def sparse_mlp_script(x: torch.Tensor, act_fn_name: str) -> torch.Tensor:
     """TorchScript compatible wrapper for sparse_mlp_forward"""
-    # Call the registered operator with detached inputs
-    return sparse_mlp_forward(x.detach(), gate_weight.detach(), up_weight.detach(), down_weight.detach(), mask.detach(), act_fn_name)
+    out =  sparse_mlp_forward(x.detach(), act_fn_name)
+    return out
 
 class FastLoRAProjection(nn.Module):
     def __init__(self, hidden_size, intermediate_size, lora_size, bias=False):
@@ -65,10 +64,9 @@ class FastLoRAProjection(nn.Module):
             self.output.resize_(batch_size, self.intermediate_size)
             self.output = self.output.to(dtype=dtype, device=device)
     
-    def forward(self, x):
+    def forward(self, x, mask):
         batch_size = x.size(0)
         self._resize_buffers(batch_size, x.dtype, x.device)
-        
         # Down projection
         torch.mm(x, self.down.weight.t(), out=self.intermediate)
         if self.down.bias is not None:
@@ -78,78 +76,105 @@ class FastLoRAProjection(nn.Module):
         torch.mm(self.intermediate, self.up.weight.t(), out=self.output)
         if self.up.bias is not None:
             self.output.add_(self.up.bias)
-        
+        self.output.mul_(mask).to(torch.bool)
+
         return self.output
 
 class LlamaSkipMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # Store config values as attributes
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.mlp_bias = config.mlp_bias  # Store this directly
-        self.hidden_act = config.hidden_act
-        self.lora_size = int(config.intermediate_size * 0.04)
+        self.mlp_bias = config.mlp_bias
         
         # Initialize layers
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=self.mlp_bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=self.mlp_bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=self.mlp_bias)
-        self.act_fn = ACT2FN[self.hidden_act]
-        self.lora_gate_proj = FastLoRAProjection(self.hidden_size, self.intermediate_size, 
-                                                self.lora_size, bias=self.mlp_bias)
-        self.sparsity = 0.2
-        
-        # Pre-convert mask to bool with correct shape
-        mask = torch.zeros(
-            (self.intermediate_size,),
-            dtype=torch.bool,
-            device=self.gate_proj.weight.device
-        ).contiguous()
-        mask[:int(self.intermediate_size * self.sparsity)] = True
-        self.register_buffer('mask', mask)
-        
-        # Pre-allocate masked output buffer with initial size
-        self.register_buffer('masked_output', torch.empty(1, self.intermediate_size))
     
-    def _resize_buffers(self, batch_size: int, dtype: torch.dtype):
-        """Resize buffers if needed"""
-        if self.masked_output.size(0) != batch_size:
-            # Resize with zero elements first to avoid warning
-            self.masked_output.resize_(0)
-            # Then resize to actual size
-            self.masked_output.resize_(batch_size, self.intermediate_size)
-            self.masked_output = self.masked_output.to(dtype=dtype)
-    
-    def forward(self, x):
-        unsqueezeX = x.view(-1, x.shape[-1])
-        
-        proj = self.lora_gate_proj(unsqueezeX)
-        self._resize_buffers(proj.size(0), proj.dtype)
-        torch.mul(proj, self.mask, out=self.masked_output)
-        mask = self.masked_output.to(torch.bool)
-        
-        down_proj = sparse_mlp_script(
-            unsqueezeX,
-            self.gate_proj.weight,
-            self.up_proj.weight,
-            self.down_proj.weight,
-            mask,
-            "silu"
-        )
-        
-        if self.down_proj.bias is not None:
-            down_proj.add_(self.down_proj.bias)
-        
-        return down_proj
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return sparse_mlp_script(x, "silu")
 
 class LlamaSkipDecoderLayer(LlamaDecoderLayer):
     def __init__(self, config: LlamaSkipConnectionConfig, layer_idx: int):
         super().__init__(config, layer_idx)
-        #changed mlp layers
         self.mlp = LlamaSkipMLP(config)
+        self.layer_idx = layer_idx
+        
+        # Add mask for MLP weights
+        self.register_buffer('mlp_mask', torch.zeros(
+            config.intermediate_size,
+            dtype=torch.bool
+        ).contiguous())
+        self.mlp_mask[:int(config.intermediate_size * 0.2)] = True  # 20% sparsity
+        
+        # Add LoRA projections for MLP weights
+        self.lora_size = int(config.intermediate_size * 0.04)
+        self.mlp_lora_proj = FastLoRAProjection(
+            config.hidden_size, 
+            config.intermediate_size,
+            self.lora_size
+        )
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
 
-
+        # Initialize weight cache for this layer
+        batch_size = hidden_states.size(0)
+            
+        # Reshape hidden states for batch processing
+        hidden_states_reshaped = hidden_states.view(-1, hidden_states.shape[-1])
+        
+        # Compute LoRA projection and apply mask
+        lora_proj_mask = self.mlp_lora_proj(hidden_states_reshaped, self.mlp_mask)
+        
+        # Compute active weights before MLP
+        compute_active_weights(
+            self.mlp.gate_proj.weight.detach(),
+            self.mlp.up_proj.weight.detach(),
+            self.mlp.down_proj.weight.detach(),
+            lora_proj_mask
+        )
+        
+        # Process attention
+        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_value=past_key_value,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        
+        hidden_states = residual + hidden_states
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        
+        # Pass through MLP
+        hidden_states = self.mlp(hidden_states.view(-1, hidden_states.shape[-1]))
+        hidden_states = hidden_states.view(residual.shape)
+        hidden_states = residual + hidden_states
+        
+        outputs = (hidden_states,)
+        if output_attentions:
+            outputs += (self_attn_weights,)
+        if use_cache:
+            outputs += (present_key_value,)
+            
+        return outputs
 
 @add_start_docstrings(
     "The bare LLaMA Model outputting raw hidden-states without any specific head on top.",

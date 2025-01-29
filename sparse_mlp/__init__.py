@@ -14,3 +14,10 @@ os.environ['MAX_JOBS'] = str(num_threads)
 
 torch.ops.load_library("./build/lib/sparse_mlp.so")
 sparse_mlp_forward = torch.ops.sparse_mlp.forward
+compute_active_weights = torch.ops.sparse_mlp.compute_active_weights
+
+__all__ = [
+    "sparse_mlp_forward",
+    "compute_active_weights", 
+    "WeightCache",
+]

@@ -10,117 +10,172 @@
 // For PyTorch's OpenMP wrapper
 #include <ATen/ParallelOpenMP.h>
 
-// Add timing utilities
-#include <chrono>
-#include <unordered_map>
+// Add pybind11 and namespace
+#include <pybind11/pybind11.h>
+namespace py = pybind11;
 
-// Timing helper class
-class Timer {
-public:
-    Timer() : start_(std::chrono::high_resolution_clock::now()) {}
-    
-    void stop(const char* name) {
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start_).count();
-        std::cout << name << ": " << duration / 1000.0 << "ms\n";
-    }
-
-    void restart() {
-        start_ = std::chrono::high_resolution_clock::now();
-    }
-
+// Add weight cache class with layer and batch support TODO Make it Model instance dependent
+class WeightCache : public torch::CustomClassHolder {
 private:
-    std::chrono::time_point<std::chrono::high_resolution_clock> start_;
+    bool is_initialized = false;
+    std::vector<torch::Tensor> active_gates;
+    std::vector<torch::Tensor> active_ups;
+    std::vector<torch::Tensor> active_downs;
+    
+    // Delete copy/move operations
+    WeightCache(const WeightCache&) = delete;
+    WeightCache& operator=(const WeightCache&) = delete;
+    WeightCache(WeightCache&&) = delete;
+    WeightCache& operator=(WeightCache&&) = delete;
+    
+protected:
+    WeightCache() = default;
+    friend c10::intrusive_ptr<WeightCache>;  // Allow make_intrusive to access constructor
+
+public:
+    static c10::intrusive_ptr<WeightCache> getInstance() {
+        static c10::intrusive_ptr<WeightCache> instance = c10::make_intrusive<WeightCache>();
+        return instance;
+    }
+    
+    void clear() {
+        active_gates = std::vector<torch::Tensor>();
+        active_ups = std::vector<torch::Tensor>();
+        active_downs = std::vector<torch::Tensor>();
+        is_initialized = false;
+    }
+    
+    void init(int64_t batch_size) {
+        clear();
+        active_gates = std::vector<torch::Tensor>(batch_size);
+        active_ups = std::vector<torch::Tensor>(batch_size);
+        active_downs = std::vector<torch::Tensor>(batch_size);
+        is_initialized = true;
+    }
+    
+    void store(int64_t batch_idx, 
+               const torch::Tensor& gate, const torch::Tensor& up, const torch::Tensor& down) {
+        active_gates[batch_idx] = gate.clone();
+        active_ups[batch_idx] = up.clone();
+        active_downs[batch_idx] = down.clone();
+    }
+    
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> get(int64_t batch_idx) {
+        auto gate = active_gates[batch_idx];
+        auto up = active_ups[batch_idx];
+        auto down = active_downs[batch_idx];
+        
+        if (!gate.defined() || !up.defined() || !down.defined()) {
+            std::cout << "Error: Weights not initialized for batch " << batch_idx << std::endl;
+            return std::make_tuple(torch::Tensor(), torch::Tensor(), torch::Tensor());
+        }
+        
+        return std::make_tuple(gate, up, down);
+    }
 };
 
-// Forward declaration with proper types
-torch::Tensor sparse_mlp_forward(
-    torch::Tensor x,
-    torch::Tensor gate_weight,
-    torch::Tensor up_weight,
-    torch::Tensor down_weight,
-    torch::Tensor mask,
-    std::string act_fn_name) {
-        
-    Timer timer;
+// Modified function to use batch-aware cache
+void compute_active_weights(
+    const torch::Tensor& gate_weight,
+    const torch::Tensor& up_weight,
+    const torch::Tensor& down_weight,
+    const torch::Tensor& mask) {
     
-    // Get dimensions
+    int64_t batch_size = mask.size(0);
+    
+    // Initialize cache with proper size at the beginning
+    WeightCache::getInstance()->init(batch_size);
+    
+    // Process batches in parallel
+    at::parallel_for(0, batch_size, 1, [&](int64_t start, int64_t end) {
+        for (int64_t batch_idx = start; batch_idx < end; batch_idx++) {
+            auto batch_mask = mask[batch_idx];
+            auto active_indices = batch_mask.nonzero().squeeze();
+            
+            // Perform index selection with clone to ensure we own the memory
+            auto active_gate = torch::index_select(gate_weight, 0, active_indices).detach().clone();
+            auto active_up = torch::index_select(up_weight, 0, active_indices).detach().clone();
+            auto active_down = torch::index_select(down_weight, 1, active_indices).detach().clone();
+            
+            // Store in cache (no need to resize since we initialized with proper size)
+            WeightCache::getInstance()->store(batch_idx, active_gate, active_up, active_down);
+        }
+    });
+}
+
+// Modified sparse MLP forward to use batch-aware cache
+torch::Tensor sparse_mlp_forward(torch::Tensor x, std::string act_fn_name) {
     int64_t batch_size = x.size(0);
     int64_t hidden_size = x.size(1);
     
     // Output allocation
-    timer.restart();
     auto options = torch::TensorOptions()
         .dtype(torch::kFloat32)
         .device(x.device())
         .layout(torch::kStrided);
     auto down_proj = torch::empty({batch_size, hidden_size}, options);
-    timer.stop("Output allocation");
     
-    // Process batches in parallel
-    timer.restart();
+    // Process batches in parallel with proper error handling
     at::parallel_for(0, batch_size, 1, [&](int64_t start, int64_t end) {
-        Timer batch_timer;
         for (int64_t i = start; i < end; i++) {
-            // Input conversion
-            batch_timer.restart();
-            auto x_batch = x[i].view({1, hidden_size}).to(torch::kFloat32);
-            auto mask_row = mask[i];
-            batch_timer.stop("Input conversion");
+            // Get cached weights safely
+            auto [active_gate_weight, active_up_weight, active_down_weight] = 
+                WeightCache::getInstance()->get(i);
             
-            // Index computation
-            batch_timer.restart();
-            auto active_indices = mask_row.nonzero().squeeze();
-            int64_t active_size = active_indices.size(0);
-            auto gate_proj = torch::empty({1, active_size}, options).detach();
-            auto up_proj = torch::empty({1, active_size}, options).detach();
-            auto out_proj = torch::empty({1, hidden_size}, options).detach();
-            batch_timer.stop("Index computation");
+            // Input conversion - keep on same device
+            auto x_batch = x[i].view({1, hidden_size});
             
-            // Weight selection
-            batch_timer.restart();
-            auto active_gate_weight = gate_weight.index_select(0, active_indices);
-            auto active_up_weight = up_weight.index_select(0, active_indices);
-            auto active_down_weight = down_weight.index_select(1, active_indices).transpose(0, 1);
-            batch_timer.stop("Weight selection");
+            // Matrix multiplications with error checking
+            torch::Tensor gate_proj, up_proj;
             
-            // Matrix multiplications
-            batch_timer.restart();
             at::parallel_for(0, 2, 1, [&](int64_t start, int64_t end) {
                 for (int64_t j = start; j < end; j++) {
                     if (j == 0) {
-                        torch::matmul_out(gate_proj, x_batch.detach(), active_gate_weight.t().detach());
+                        gate_proj = torch::matmul(x_batch, active_gate_weight.t());
                     } else {
-                        torch::matmul_out(up_proj, x_batch.detach(), active_up_weight.t().detach());
+                        up_proj = torch::matmul(x_batch, active_up_weight.t());
                     }
                 }
             });
-            batch_timer.stop("Matrix multiplications");
             
             // Activation
-            batch_timer.restart();
             auto activated = gate_proj * torch::sigmoid(gate_proj);
             auto gate_act = activated * up_proj;
-            batch_timer.stop("Activation");
             
             // Final projection
-            batch_timer.restart();
-            torch::matmul_out(out_proj, gate_act, active_down_weight);
-            down_proj[i].copy_(out_proj[0].detach());
-            batch_timer.stop("Final projection");
+            auto out_proj = torch::matmul(gate_act, active_down_weight.t());
+            down_proj[i].copy_(out_proj[0]);
         }
     });
-    timer.stop("Total batch processing");
     
     return down_proj;
 }
 
-// Register the operator
-TORCH_LIBRARY(sparse_mlp, m) {
-    m.def("forward", sparse_mlp_forward);
-}
-
-// Make the function visible to Python
+// Register operators and expose WeightCache to Python
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("forward", &sparse_mlp_forward, "Sparse MLP forward");
+    m.def("compute_active_weights", &compute_active_weights, "Compute active weights");
+    
+    // Expose WeightCache class
+    py::class_<WeightCache, c10::intrusive_ptr<WeightCache>>(m, "WeightCache")
+        .def_static("getInstance", &WeightCache::getInstance)
+        .def("init", &WeightCache::init)
+        .def("store", &WeightCache::store)
+        .def("get", &WeightCache::get)
+        .def("clear", &WeightCache::clear)
+        .def("__repr__", [](const WeightCache&) {
+            return "WeightCache(singleton)";
+        });
+}
+
+// Register TorchScript operators
+TORCH_LIBRARY(sparse_mlp, m) {
+    m.def("forward", sparse_mlp_forward);
+    m.def("compute_active_weights", compute_active_weights);
+    m.class_<WeightCache>("WeightCache")
+        .def_static("getInstance", &WeightCache::getInstance)
+        .def("init", &WeightCache::init)
+        .def("store", &WeightCache::store)
+        .def("get", &WeightCache::get)
+        .def("clear", &WeightCache::clear);
 } 
