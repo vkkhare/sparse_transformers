@@ -32,26 +32,59 @@ from sparse_mlp import (
     compute_active_weights
 )
 
-
 from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 
 logger = logging.get_logger(__name__)
 
-@torch.jit.script
-def sparse_mlp_script(x: torch.Tensor, act_fn_name: str) -> torch.Tensor:
-    """TorchScript compatible wrapper for sparse_mlp_forward"""
-    out =  sparse_mlp_forward(x.detach(), act_fn_name)
-    return out
+class LayerTimer:
+    def __init__(self):
+        self.timings = {
+            'attention': [],
+            'lora_proj': [],
+            'compute_weights': [],
+            'mlp': [],
+            'layernorm': [],
+            'standard_mlp': []  # For standard Llama MLP
+        }
+        self.start = None
+        self.end = None
+        
+    def start_timer(self):
+        self.start = torch.cuda.Event(enable_timing=True)
+        self.end = torch.cuda.Event(enable_timing=True)
+        self.start.record()
+        
+    def stop_timer(self, component: str):
+        self.end.record()
+        torch.cuda.synchronize()
+        self.timings[component].append(self.start.elapsed_time(self.end))
+    
+    def print_stats(self):
+        print("\nGlobal Component Timing Statistics:")
+        for component, times in self.timings.items():
+            if times:
+                avg_time = sum(times) / len(times)
+                min_time = min(times)
+                max_time = max(times)
+                print(f"\n{component}:")
+                print(f"  Avg: {avg_time:.3f}ms")
+                print(f"  Min: {min_time:.3f}ms")
+                print(f"  Max: {max_time:.3f}ms")
+                print(f"  Total: {sum(times):.3f}ms")
+                print(f"  Count: {len(times)}")
+
+# Create global timer instance
+global_timer = LayerTimer()
 
 class FastLoRAProjection(nn.Module):
-    def __init__(self, hidden_size, intermediate_size, lora_size, bias=False):
+    def __init__(self, hidden_size, intermediate_size, lora_size):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.lora_size = lora_size
         
-        self.down = nn.Linear(hidden_size, lora_size, bias=bias)
-        self.up = nn.Linear(lora_size, intermediate_size, bias=bias)
+        self.down = nn.Linear(hidden_size, lora_size, bias=False)
+        self.up = nn.Linear(lora_size, intermediate_size, bias=False)
         
         # Pre-allocate all buffers
         self.register_buffer('intermediate', torch.empty(1, lora_size))
@@ -63,42 +96,34 @@ class FastLoRAProjection(nn.Module):
             self.intermediate = self.intermediate.to(dtype=dtype, device=device)
             self.output.resize_(batch_size, self.intermediate_size)
             self.output = self.output.to(dtype=dtype, device=device)
-    
+   
+    @torch.jit.script_method
     def forward(self, x, mask):
         batch_size = x.size(0)
         self._resize_buffers(batch_size, x.dtype, x.device)
-        # Down projection
         torch.mm(x, self.down.weight.t(), out=self.intermediate)
-        if self.down.bias is not None:
-            self.intermediate.add_(self.down.bias)
-        
-        # Up projection
         torch.mm(self.intermediate, self.up.weight.t(), out=self.output)
-        if self.up.bias is not None:
-            self.output.add_(self.up.bias)
-        self.output.mul_(mask).to(torch.bool)
-
-        return self.output
+        return self.output.mul(mask)
 
 class LlamaSkipMLP(nn.Module):
-    def __init__(self, config):
+    def __init__(self, hidden_size: int, intermediate_size: int, bias: bool = False):
         super().__init__()
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = config.intermediate_size
-        self.mlp_bias = config.mlp_bias
-        
-        # Initialize layers
-        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=self.mlp_bias)
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=self.mlp_bias)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=self.mlp_bias)
-    
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
+
+    @torch.jit.script_method
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return sparse_mlp_script(x, "silu")
+        return sparse_mlp_forward(x.detach(), "silu")
 
 class LlamaSkipDecoderLayer(LlamaDecoderLayer):
     def __init__(self, config: LlamaSkipConnectionConfig, layer_idx: int):
         super().__init__(config, layer_idx)
-        self.mlp = LlamaSkipMLP(config)
+        self.mlp = LlamaSkipMLP(
+            config.hidden_size,
+            config.intermediate_size,
+            config.mlp_bias
+        )
         self.layer_idx = layer_idx
         
         # Add mask for MLP weights
@@ -108,7 +133,7 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
         ).contiguous())
         self.mlp_mask[:int(config.intermediate_size * 0.2)] = True  # 20% sparsity
         
-        # Add LoRA projections for MLP weights
+        # Create LoRA projection
         self.lora_size = int(config.intermediate_size * 0.04)
         self.mlp_lora_proj = FastLoRAProjection(
             config.hidden_size, 
@@ -127,27 +152,32 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        # Layernorm timing
+        global_timer.start_timer()
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-
-        # Initialize weight cache for this layer
-        batch_size = hidden_states.size(0)
-            
+        global_timer.stop_timer('layernorm')
+        
         # Reshape hidden states for batch processing
-        hidden_states_reshaped = hidden_states.view(-1, hidden_states.shape[-1])
+        hidden_states_reshaped = hidden_states.view(-1, hidden_states.shape[-1]).to(torch.float32)
         
-        # Compute LoRA projection and apply mask
+        # LoRA projection timing
+        global_timer.start_timer()
         lora_proj_mask = self.mlp_lora_proj(hidden_states_reshaped, self.mlp_mask)
+        global_timer.stop_timer('lora_proj')
         
-        # Compute active weights before MLP
+        # Compute weights timing
+        global_timer.start_timer()
         compute_active_weights(
             self.mlp.gate_proj.weight.detach(),
             self.mlp.up_proj.weight.detach(),
             self.mlp.down_proj.weight.detach(),
             lora_proj_mask
         )
+        global_timer.stop_timer('compute_weights')
         
-        # Process attention
+        # Attention timing
+        global_timer.start_timer()
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -158,14 +188,18 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
             cache_position=cache_position,
             **kwargs,
         )
+        global_timer.stop_timer('attention')
         
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         
         # Pass through MLP
+        global_timer.start_timer()
         hidden_states = self.mlp(hidden_states.view(-1, hidden_states.shape[-1]))
         hidden_states = hidden_states.view(residual.shape)
+        global_timer.stop_timer('mlp')
+        
         hidden_states = residual + hidden_states
         
         outputs = (hidden_states,)

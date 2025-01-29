@@ -2,7 +2,7 @@
 import torch
 
 from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
-from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection
+from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection, global_timer
 from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 import gc
 import time
@@ -34,26 +34,31 @@ tokenizer.pad_token = tokenizer.eos_token
 # Create custom config and model
 config = LlamaSkipConnectionConfig.from_pretrained(model_id)
 
-# Load model without device_map
-model = LlamaSkipConnectionForCausalLM.from_pretrained(
+# # Load model without device_map
+# model = LlamaSkipConnectionForCausalLM.from_pretrained(
+#     checkpoint, 
+#     config=config
+# ).to(device)
+
+
+
+# model.eval()
+# Create scripted version of the model
+scripted_model = LlamaSkipConnectionForCausalLM.from_pretrained(
     checkpoint, 
     config=config
 ).to(device)
-
+scripted_model.eval()
 # Move all masks to the correct device
-for module in model.modules():
+for module in scripted_model.modules():
     if hasattr(module, 'mask'):
         module.mask = module.mask.to(device)
 
-model.eval()
-# Create scripted version of the model
-scripted_model = model
 for module in scripted_model.modules():
     if isinstance(module, LlamaSkipMLP) or isinstance(module, FastLoRAProjection):
         module.eval()  # Ensure in eval mode before scripting
         try:
             scripted_module = torch.jit.script(module)
-            # Replace the module's forward method with the scripted version
             module.forward = scripted_module.forward
         except Exception as e:
             print(f"Failed to script module {type(module).__name__}: {str(e)}")
@@ -74,19 +79,19 @@ input_ids = inputs["input_ids"].to(device)
 attention_mask = inputs["attention_mask"].to(device)
 
 # Debug prints
-print(f"Model device: {next(model.parameters()).device}")
+print(f"Model device: {next(scripted_model.parameters()).device}")
 print(f"Input IDs device: {input_ids.device}")
 print(f"Attention Mask device: {attention_mask.device}")
 
 # Create pipelines for each model variant
-llamaSkipPipe = pipeline(
-    "text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    max_new_tokens = 1000,
-    device=device,
-    eos_token_id=tokenizer.eos_token_id
-)
+# llamaSkipPipe = pipeline(
+#     "text-generation",
+#     model=model,
+#     tokenizer=tokenizer,
+#     max_new_tokens = 1000,
+#     device=device,
+#     eos_token_id=tokenizer.eos_token_id
+# )
 # messages = [
 #     {"role": "system", "content": "You are a pirate chatbot who always responds in pirate speak!"},
 #     {"role": "user", "content": "Who are you?"},
@@ -111,10 +116,10 @@ llamaSkipScriptedPipe = pipeline(
 # )
 
 # llamaPipe.model.to(torch.float32)
-llamaSkipPipe.model.to(torch.float32)
+# llamaSkipPipe.model.to(torch.float32)
 llamaSkipScriptedPipe.model.to(torch.float32)
 
-def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=5):
+def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=10):
     model = model.cpu()
     base_input_ids = input_ids.cpu()
     base_attention_mask = attention_mask.cpu()
@@ -174,6 +179,13 @@ def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=5):
             
         end = time.perf_counter()
         times.append(end - start)    
+
+    # After inference, print global timing stats
+    global_timer.print_stats()
+    
+    # Clear timings for next run
+    global_timer.timings = {k: [] for k in global_timer.timings.keys()}
+    
     return times
 
 print("Running CPU inference benchmarks...")
