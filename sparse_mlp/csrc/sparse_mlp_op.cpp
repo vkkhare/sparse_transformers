@@ -82,22 +82,19 @@ void compute_active_weights(
     const torch::Tensor& mask) {
     
     int64_t batch_size = mask.size(0);
-    
-    // Initialize cache with proper size at the beginning
     WeightCache::getInstance()->init(batch_size);
     
-    // Process batches in parallel
     at::parallel_for(0, batch_size, 1, [&](int64_t start, int64_t end) {
-        for (int64_t batch_idx = start; batch_idx < end; batch_idx++) {
+        for (int64_t batch_idx = start; batch_idx < end; batch_idx++) {            
             auto batch_mask = mask[batch_idx];
             auto active_indices = batch_mask.nonzero().squeeze();
+            int64_t num_active = active_indices.size(0);
             
-            // Perform index selection with clone to ensure we own the memory
-            auto active_gate = gate_weight.index_select(0, active_indices).detach();
-            auto active_up = up_weight.index_select(0, active_indices).detach();
-            auto active_down = down_weight.index_select(1, active_indices).detach();
+            // Use slice operations with correct dimensions
+            auto active_gate = gate_weight.narrow(0, 0, num_active).detach();
+            auto active_up = up_weight.narrow(0, 0, num_active).detach();
+            auto active_down = down_weight.narrow(1, 0, num_active).detach();
             
-            // Store in cache (no need to resize since we initialized with proper size)
             WeightCache::getInstance()->store(batch_idx, active_gate, active_up, active_down);
         }
     });
@@ -108,42 +105,32 @@ torch::Tensor sparse_mlp_forward(torch::Tensor x, std::string act_fn_name) {
     int64_t batch_size = x.size(0);
     int64_t hidden_size = x.size(1);
     
-    // Output allocation
     auto options = torch::TensorOptions()
         .dtype(torch::kFloat32)
         .device(x.device())
         .layout(torch::kStrided);
-    auto down_proj = torch::empty({batch_size, hidden_size}, options);
     
-    // Process batches in parallel with proper error handling
+    auto down_proj = torch::empty({batch_size, hidden_size}, options);
+
+    
     at::parallel_for(0, batch_size, 1, [&](int64_t start, int64_t end) {
-        for (int64_t i = start; i < end; i++) {
-            // Get cached weights safely
+        for (int64_t batch_idx = start; batch_idx < end; batch_idx++) {
             auto [active_gate_weight, active_up_weight, active_down_weight] = 
-                WeightCache::getInstance()->get(i);
+                WeightCache::getInstance()->get(batch_idx);
+
+            auto x_batch = x[batch_idx].unsqueeze(0);
+            auto gate_proj = torch::empty({1, active_gate_weight.size(0)}, options);
+            auto up_proj = torch::empty({1, active_up_weight.size(0)}, options);
+            // Gate projection with pre-allocated tensors
+            torch::matmul_out(gate_proj, x_batch.detach(), active_gate_weight.t());
+            gate_proj.mul_(torch::sigmoid(gate_proj));
             
-            // Input conversion - keep on same device
-            auto x_batch = x[i].view({1, hidden_size});
-            // Pre-allocate tensors with correct shapes and no grad
-            auto gate_proj = torch::empty({1, active_gate_weight.size(0)}, options).detach();
-            auto up_proj = torch::empty({1, active_gate_weight.size(0)}, options).detach();
-            auto out_proj = torch::empty({1, hidden_size}, options).detach();
-            // Use at::parallel_for for the two matmuls
-            at::parallel_for(0, 2, 1, [&](int64_t start, int64_t end) {
-                for (int64_t j = start; j < end; j++) {
-                    if (j == 0) {
-                        torch::matmul_out(gate_proj, x_batch.detach(), active_gate_weight.t());
-                    } else {
-                        torch::matmul_out(up_proj, x_batch.detach(), active_up_weight.t());
-                    }
-                }
-            });
+            // Up projection with pre-allocated tensors
+            torch::matmul_out(up_proj, x_batch.detach(), active_up_weight.t());
             
-            auto activated = gate_proj * torch::sigmoid(gate_proj);
-            auto gate_act = activated * up_proj;
-            
-            torch::matmul_out(out_proj, gate_act, active_down_weight.t());
-            down_proj[i] = out_proj[0];
+            // Final projection
+            auto gate_act = gate_proj.mul(up_proj);
+            down_proj[batch_idx] = torch::matmul(gate_act, active_down_weight.t())[0];
         }
     });
     

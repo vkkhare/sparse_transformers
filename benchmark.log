@@ -8,88 +8,37 @@ Running CPU inference benchmarks...
 --------------------------------------------------
 Warming up models...
 
-Model type: <class 'src.models.modelling_llama_skip.LlamaSkipConnectionForCausalLM'>
+Model type: <class 'transformers.models.llama.modeling_llama.LlamaForCausalLM'>
 Model dtype: torch.float32
 
 Global Component Timing Statistics:
-
-attention:
-  Avg: 4.660ms
-  Min: 3.931ms
-  Max: 11.093ms
-  Total: 149.132ms
-  Count: 32
-
-lora_proj:
-  Avg: 1.924ms
-  Min: 0.116ms
-  Max: 45.574ms
-  Total: 61.580ms
-  Count: 32
-
-compute_weights:
-  Avg: 27.501ms
-  Min: 2.843ms
-  Max: 45.120ms
-  Total: 880.024ms
-  Count: 32
-
-mlp:
-  Avg: 9.933ms
-  Min: 0.913ms
-  Max: 16.953ms
-  Total: 317.850ms
-  Count: 32
-
-layernorm:
-  Avg: 0.184ms
-  Min: 0.135ms
-  Max: 0.421ms
-  Total: 5.884ms
-  Count: 32
 
 Model type: <class 'src.models.modelling_llama_skip.LlamaSkipConnectionForCausalLM'>
 Model dtype: torch.float32
 
 Global Component Timing Statistics:
 
-attention:
-  Avg: 32.843ms
-  Min: 3.825ms
-  Max: 220.825ms
-  Total: 5254.942ms
-  Count: 160
+Model type: <class 'src.models.modelling_llama_skip.LlamaSkipConnectionForCausalLM'>
+Model dtype: torch.float32
 
-lora_proj:
-  Avg: 3.049ms
-  Min: 0.109ms
-  Max: 32.836ms
-  Total: 487.848ms
-  Count: 160
+Global Component Timing Statistics:
 
-compute_weights:
-  Avg: 28.174ms
-  Min: 3.064ms
-  Max: 62.477ms
-  Total: 4507.830ms
-  Count: 160
+Model type: <class 'transformers.models.llama.modeling_llama.LlamaForCausalLM'>
+Model dtype: torch.float32
 
-mlp:
-  Avg: 11.497ms
-  Min: 0.909ms
-  Max: 42.308ms
-  Total: 1839.548ms
-  Count: 160
-
-layernorm:
-  Avg: 0.174ms
-  Min: 0.002ms
-  Max: 0.238ms
-  Total: 27.893ms
-  Count: 160
+Global Component Timing Statistics:
 
 SkipLLaMA Scripted CPU Results:
-Average time: 1.501s
-Min time: 0.831s
-Max time: 4.439s
-Individual times: ['0.831s', '4.439s', '2.754s', '0.846s', '0.835s', '0.840s', '1.245s', '0.872s', '0.843s']
+Average time: 0.575s
+Min time: 0.345s
+Max time: 3.658s
+Individual times: ['0.348s', '0.357s', '0.366s', '0.356s', '0.345s', '0.354s', '0.353s', '0.401s', '0.358s', '0.780s', '3.658s', '1.819s', '0.383s', '0.383s', '0.385s', '0.382s', '0.389s', '0.379s', '0.382s', '0.382s', '0.385s', '0.385s', '0.386s', '0.388s', '0.388s', '0.387s', '0.386s', '0.390s', '0.388s', '0.382s', '0.390s', '0.386s', '0.385s', '0.388s', '0.388s', '0.395s', '0.780s', '1.309s', '2.126s', '0.664s', '1.618s', '0.359s', '0.366s', '0.366s', '0.369s', '0.372s', '0.368s', '0.365s', '0.364s']
+
+Standard LLaMA CPU Results:
+Average time: 0.622s
+Min time: 0.375s
+Max time: 3.377s
+Individual times: ['0.433s', '0.437s', '0.434s', '0.438s', '0.436s', '0.436s', '0.433s', '0.437s', '0.432s', '0.436s', '0.435s', '0.434s', '0.434s', '0.475s', '3.377s', '2.587s', '0.375s', '0.375s', '0.378s', '0.379s', '0.381s', '0.377s', '0.379s', '0.378s', '0.387s', '0.384s', '0.379s', '0.388s', '0.379s', '0.379s', '0.380s', '0.377s', '0.377s', '0.378s', '0.381s', '0.380s', '0.377s', '0.382s', '0.426s', '0.435s', '1.483s', '2.981s', '1.714s', '0.501s', '0.500s', '0.511s', '0.504s', '0.500s', '0.500s']
+
+CPU Speedups:
+Scripted vs Standard: 1.08x
