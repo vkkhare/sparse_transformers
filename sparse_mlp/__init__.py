@@ -19,5 +19,4 @@ compute_active_weights = torch.ops.sparse_mlp.compute_active_weights
 __all__ = [
     "sparse_mlp_forward",
     "compute_active_weights", 
-    "WeightCache",
 ]

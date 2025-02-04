@@ -36,46 +36,6 @@ from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 
 logger = logging.get_logger(__name__)
 
-class LayerTimer:
-    def __init__(self):
-        self.timings = {
-            'attention': [],
-            'lora_proj': [],
-            'compute_weights': [],
-            'mlp': [],
-            'layernorm': [],
-            'standard_mlp': []  # For standard Llama MLP
-        }
-        self.start = None
-        self.end = None
-        
-    def start_timer(self):
-        self.start = torch.cuda.Event(enable_timing=True)
-        self.end = torch.cuda.Event(enable_timing=True)
-        self.start.record()
-        
-    def stop_timer(self, component: str):
-        self.end.record()
-        torch.cuda.synchronize()
-        self.timings[component].append(self.start.elapsed_time(self.end))
-    
-    def print_stats(self):
-        print("\nGlobal Component Timing Statistics:")
-        for component, times in self.timings.items():
-            if times:
-                avg_time = sum(times) / len(times)
-                min_time = min(times)
-                max_time = max(times)
-                print(f"\n{component}:")
-                print(f"  Avg: {avg_time:.3f}ms")
-                print(f"  Min: {min_time:.3f}ms")
-                print(f"  Max: {max_time:.3f}ms")
-                print(f"  Total: {sum(times):.3f}ms")
-                print(f"  Count: {len(times)}")
-
-# Create global timer instance
-global_timer = LayerTimer()
-
 class FastLoRAProjection(nn.Module):
     def __init__(self, hidden_size, intermediate_size, lora_size):
         super().__init__()
@@ -111,10 +71,19 @@ class LlamaSkipMLP(nn.Module):
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
+        
+        # Register buffers for MLP computation
+        self.register_buffer('down_proj_buffer', torch.zeros(14, hidden_size, requires_grad=False))
+        self.register_buffer('combined_proj_buffer', torch.zeros(14, 2 * 1638, requires_grad=False))  # max_gate_size = 1638
 
     @torch.jit.script_method
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return sparse_mlp_forward(x.detach(), "silu")
+        return sparse_mlp_forward(
+            x.detach(), 
+            self.down_proj_buffer,
+            self.combined_proj_buffer,
+            "silu"
+        )
 
 class LlamaSkipDecoderLayer(LlamaDecoderLayer):
     def __init__(self, config: LlamaSkipConnectionConfig, layer_idx: int):

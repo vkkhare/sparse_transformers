@@ -2,7 +2,7 @@
 import torch
 
 from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
-from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection, global_timer
+from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection
 from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 import gc
 import time
@@ -125,7 +125,6 @@ def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=50):
     base_attention_mask = attention_mask.cpu()
     
     print(f"\nModel type: {type(model)}")
-    # print(f"Model config: {model.config}")
     print(f"Model dtype: {next(model.parameters()).dtype}")
     
     times = []
@@ -137,54 +136,35 @@ def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=50):
         # Randomize input for each run
         random_shift = torch.randint(-100, 100, base_input_ids.shape)
         input_ids = torch.clamp(base_input_ids + random_shift, min=0, max=tokenizer.vocab_size-1)
-        attention_mask = base_attention_mask  # Keep attention mask same
+        attention_mask = base_attention_mask
         
+        # Reset model state
         if hasattr(model, 'past_key_values'):
             model.past_key_values = None
         model._past_length = 0
         model.config.use_cache = False
         
-        # Warmup iteration for more accurate timing
+        # Warmup iteration
         if i == 0:
             with torch.no_grad():
-                _ = model.generate(
+                _ = model(
                     input_ids,
                     attention_mask=attention_mask,
-                    max_new_tokens=1,
-                    temperature=0.7,
-                    top_p=0.9,
-                    num_return_sequences=1,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                    use_cache=False,
-                    return_dict_in_generate=False
+                    return_dict=False
                 )
             continue
         
         start = time.perf_counter()
         
         with torch.no_grad():
-            outputs = model.generate(
+            _ = model(
                 input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=1,
-                temperature=0.7,
-                top_p=0.9,
-                num_return_sequences=1,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-                use_cache=False,
-                return_dict_in_generate=False
+                return_dict=False
             )
             
         end = time.perf_counter()
         times.append(end - start)    
-
-    # After inference, print global timing stats
-    global_timer.print_stats()
-    
-    # Clear timings for next run
-    global_timer.timings = {k: [] for k in global_timer.timings.keys()}
     
     return times
 
