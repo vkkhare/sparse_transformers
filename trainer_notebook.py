@@ -2,6 +2,7 @@
 import torch
 
 from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
+from transformers.models.llama.modeling_llama import LlamaMLP
 from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection
 from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
 import gc
@@ -128,7 +129,19 @@ def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=50):
     print(f"Model dtype: {next(model.parameters()).dtype}")
     
     times = []
-    
+    mlp_times = []  # Track MLP times separately
+    for module in model.modules():
+        if isinstance(module, LlamaSkipMLP) or isinstance(module, LlamaMLP):
+            # Add forward hook to track MLP time
+            def forward_hook(module, input, output):
+                start = time.perf_counter()
+                result = module.forward(*input)
+                end = time.perf_counter()
+                mlp_times.append(end - start)
+                return result
+            
+            module.register_forward_hook(forward_hook)
+
     for i in range(num_runs):
         torch.cuda.empty_cache()
         gc.collect()
@@ -166,20 +179,20 @@ def run_inference(model, input_ids, attention_mask, tokenizer, num_runs=50):
         end = time.perf_counter()
         times.append(end - start)    
     
-    return times
+    return times, mlp_times
 
 print("Running CPU inference benchmarks...")
 print("-" * 50)
 
 # Warm up runs
 print("Warming up models...")
-_ = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
+_, _ = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
 # _ = run_inference(llamaSkipPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
-_ = run_inference(llamaSkipScriptedPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
+_, _ = run_inference(llamaSkipScriptedPipe.model, input_ids, attention_mask, tokenizer, num_runs=2)
 
 # Actual benchmarks
-skip_scripted_times = run_inference(llamaSkipScriptedPipe.model, input_ids, attention_mask, tokenizer)
-std_times = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer)
+skip_scripted_times, skip_scripted_mlp_times = run_inference(llamaSkipScriptedPipe.model, input_ids, attention_mask, tokenizer)
+std_times, std_mlp_times = run_inference(llamaPipe.model, input_ids, attention_mask, tokenizer)
 # skip_times = run_inference(llamaSkipPipe.model, input_ids, attention_mask, tokenizer)
 
 print_results = lambda name, times: (
@@ -189,6 +202,9 @@ print_results = lambda name, times: (
     print(f"Max time: {max(times):.3f}s"),
     print(f"Individual times: {[f'{t:.3f}s' for t in times]}")
 )
+
+print_results("SkipLLaMA Scripted MLP", skip_scripted_mlp_times)
+print_results("Standard LLaMA MLP", std_mlp_times)
 
 calc_speedup = lambda t1, t2: (sum(t1)/len(t1))/(sum(t2)/len(t2))
 
