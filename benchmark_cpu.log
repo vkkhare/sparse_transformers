@@ -1,0 +1,53 @@
+Device set to use cpu
+Device set to use cpu
+Configuring for 64 CPU threads
+
+System Configuration:
+--------------------------------------------------
+OS: Linux 5.15.0-1079-azure
+CPU: x86_64
+Physical cores: 64
+Total cores: 64
+Max CPU frequency: 0MHz
+Current CPU frequency: 2469MHz
+RAM: Total=433.00GB, Available=425.83GB (1.7% used)
+
+PyTorch version: 2.5.1
+CUDA version: 12.4
+--------------------------------------------------
+Using device: cpu
+
+Running CPU inference benchmarks...
+--------------------------------------------------
+Warming up models...
+
+Model type: <class 'transformers.models.llama.modeling_llama.LlamaForCausalLM'>
+Model device: cpu
+Model path: meta-llama/Llama-3.2-1B-Instruct
+
+Model type: <class 'src.models.modelling_llama_skip.LlamaSkipConnectionForCausalLM'>
+Model device: cpu
+Model path: meta-llama/Llama-3.2-1B-Instruct
+
+Model type: <class 'src.models.modelling_llama_skip.LlamaSkipConnectionForCausalLM'>
+Model device: cpu
+Model path: meta-llama/Llama-3.2-1B-Instruct
+
+Model type: <class 'transformers.models.llama.modeling_llama.LlamaForCausalLM'>
+Model device: cpu
+Model path: meta-llama/Llama-3.2-1B-Instruct
+
+SkipLLaMA Scripted CPU Results:
+Average time: 0.825s
+Min time: 0.239s
+Max time: 4.645s
+Individual times: ['3.291s', '1.295s', '0.457s', '0.998s', '0.288s', '0.247s', '0.859s', '0.246s', '0.251s', '0.253s', '4.645s', '2.644s', '0.245s', '0.751s', '0.263s', '0.239s', '0.244s', '0.919s', '0.257s', '0.344s', '0.525s', '0.510s', '0.253s', '0.242s', '0.345s', '1.621s', '0.960s', '0.272s', '3.075s', '0.260s', '0.382s', '2.699s', '4.075s', '0.252s', '0.506s', '0.769s', '0.283s', '0.325s', '0.264s', '0.913s', '0.326s', '0.249s', '0.251s', '0.741s', '0.465s', '0.264s', '0.871s', '0.287s', '0.250s', '0.259s']
+
+Standard LLaMA CPU Results:
+Average time: 1.127s
+Min time: 0.321s
+Max time: 6.566s
+Individual times: ['1.184s', '0.370s', '1.114s', '0.396s', '0.444s', '0.921s', '0.368s', '0.455s', '4.830s', '2.166s', '0.389s', '0.971s', '0.406s', '1.131s', '0.627s', '2.707s', '0.363s', '0.426s', '1.034s', '0.456s', '0.371s', '0.691s', '0.414s', '0.732s', '0.802s', '0.354s', '0.330s', '6.566s', '0.596s', '1.025s', '0.481s', '1.891s', '0.989s', '0.437s', '0.362s', '1.326s', '1.390s', '0.377s', '0.384s', '1.529s', '5.424s', '3.241s', '1.755s', '0.401s', '0.433s', '0.842s', '0.392s', '1.384s', '0.367s', '0.321s']
+
+CPU Speedups:
+Scripted vs Standard: 1.37x
