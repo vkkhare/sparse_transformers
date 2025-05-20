@@ -74,17 +74,20 @@ Current CUDA speedup: 0.85x (optimization in progress)
 
 #### CPU Performance
 ```
-Standard LLaMA:
-- Average time: 1.824s
-- Min: 1.095s
-- Max: 6.964s
+SkipLLaMA 3B Scripted CPU Results:
+Average time: 1.528s
+Min time: 1.072s
+Max time: 6.085s
 
-SkipLLaMA Scripted:
-- Average time: 1.095s
-- Min: 0.741s
-- Max: 4.726s
 
-CPU speedup: 1.67x
+Standard 3B LLaMA CPU Results:
+Average time: 3.704s
+Min time: 2.387s
+Max time: 7.840s
+
+
+CPU Speedups:
+Scripted vs Standard: 2.42x
 ```
 
 ## Implementation Details
