@@ -10,8 +10,8 @@ from typing import List, Dict, Tuple, Optional
 import torch
 from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
 from transformers.models.llama.modeling_llama import LlamaMLP
-from src.models.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection
-from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
+from src.models.llama.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection
+from src.models.llama.configuration_llama_skip import LlamaSkipConnectionConfig
 
 
 def parse_args() -> argparse.Namespace:

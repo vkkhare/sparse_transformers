@@ -36,14 +36,14 @@ python -c "import sparse_mlp; print('Installation successful!')"
 
 ```bash
 # Run on CUDA with config and verbose output
-python trainer_notebook.py \
+python run_benchmark.py \
     --device cuda \
     --config configs/llama_skip_causal_3b.json \
     --num_runs 50 \
     --verbose True
 
 # Run on CPU with timing details
-python trainer_notebook.py \
+python run_benchmark.py \
     --device cpu \
     --config configs/llama_skip_causal_3b.json \
     --verbose True

@@ -32,7 +32,7 @@ from sparse_mlp import (
     compute_active_weights
 )
 
-from src.models.configuration_llama_skip import LlamaSkipConnectionConfig
+from src.models.llama.configuration_llama_skip import LlamaSkipConnectionConfig
 
 logger = logging.get_logger(__name__)
 
@@ -595,3 +595,6 @@ class LlamaSkipConnectionForCausalLM(LlamaSkipPreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+
+__all__ = [LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection]

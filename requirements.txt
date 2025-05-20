@@ -213,7 +213,6 @@ sounddevice==0.5.1
 soundfile==0.12.1
 soupsieve==2.6
 soxr==0.3.7
--e git+ssh://git@github.com/NimbleEdge/weight_caching.git@6b03aaaf2ce80382d270538b9913777441d14270#egg=sparse_mlp
 SQLAlchemy==2.0.35
 ssh-import-id==5.10
 starlette==0.38.6
