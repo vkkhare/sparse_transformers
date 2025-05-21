@@ -12,11 +12,14 @@ torch.set_num_threads(num_threads)
 torch.set_num_interop_threads(num_threads)
 os.environ['MAX_JOBS'] = str(num_threads)
 
-torch.ops.load_library("./build/lib/sparse_mlp.so")
-sparse_mlp_forward = torch.ops.sparse_mlp.forward
-compute_active_weights = torch.ops.sparse_mlp.compute_active_weights
+# torch.ops.load_library("./build/lib/sparse_mlp.so")
+torch.classes.load_library("./build/lib/sparse_mlp.so")
 
+sparse_mlp_forward = torch.ops.sparse_mlp.forward
+WeightCache = torch.classes.sparse_mlp.WeightCache
+
+# Re-export for API compatibility
 __all__ = [
-    "sparse_mlp_forward",
-    "compute_active_weights", 
+    'sparse_mlp_forward', 
+    'WeightCache'
 ]

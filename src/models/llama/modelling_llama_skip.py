@@ -29,7 +29,7 @@ import torch.utils.cpp_extension
 import torch
 from sparse_mlp import (
     sparse_mlp_forward,
-    compute_active_weights
+    WeightCache
 )
 
 from src.models.llama.configuration_llama_skip import LlamaSkipConnectionConfig
@@ -78,6 +78,21 @@ class LlamaSkipMLP(nn.Module):
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
         self.sparsity = sparsity
+        
+        # Create and initialize weight cache directly
+        self.weight_cache = WeightCache(            \
+            dummy_mask, 
+            hidden_size,
+            self.gate_proj.weight.detach(),
+            self.up_proj.weight.detach(), 
+            self.down_proj.weight.detach()
+            )
+        
+        # Create a dummy mask for initialization
+        mask_shape = [1, int(intermediate_size * sparsity)]
+        options = torch.TensorOptions().dtype(torch.bool)
+        dummy_mask = torch.zeros(mask_shape, options)
+        
         # Register buffers for MLP computation
         self.register_buffer('down_proj_buffer', torch.zeros(14, hidden_size, requires_grad=False))
         self.register_buffer('combined_proj_buffer', torch.zeros(14, 2 * int(intermediate_size * sparsity), requires_grad=False))  # max_gate_size = 1638
@@ -88,9 +103,11 @@ class LlamaSkipMLP(nn.Module):
         if device:
             self.down_proj_buffer = self.down_proj_buffer.to(device)
             self.combined_proj_buffer = self.combined_proj_buffer.to(device)
+        return super().to(*args, **kwargs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return sparse_mlp_forward(
+            self.weight_cache,
             x.detach(), 
             self.down_proj_buffer,
             self.combined_proj_buffer,
@@ -123,6 +140,9 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
             config.intermediate_size,
             self.lora_size
         )
+        
+        # Simply use the weight cache from the MLP
+        self.weight_cache = self.mlp.weight_cache
 
     def to(self, *args, **kwargs):
         # Move mask to same device as model when .to() is called
@@ -150,11 +170,9 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
         
         # LoRA projection
         lora_proj_mask = self.mlp_lora_proj(hidden_states_reshaped, self.mlp_mask)
-        # Compute weights
-        compute_active_weights(
-            self.mlp.gate_proj.weight.detach(),
-            self.mlp.up_proj.weight.detach(),
-            self.mlp.down_proj.weight.detach(),
+        
+        # Only compute active weights based on the mask using explicit weight cache
+        self.weight_cache.update_active_weights(
             lora_proj_mask[:, :int(self.mlp.gate_proj.weight.shape[0] * self.sparsity)]
         )
 
