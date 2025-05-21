@@ -284,15 +284,12 @@ __global__ void sparse_mlp_output_cuda_kernel<at::Half>(
 
 // Main CUDA implementation
 torch::Tensor sparse_mlp_forward_cuda(
-    c10::intrusive_ptr<WeightCache> weight_cache,
     const torch::Tensor& input,
+    const torch::Tensor& concat_weight,
+    const torch::Tensor& active_down_weight,
     torch::Tensor& down_proj_buffer,
     torch::Tensor& combined_proj_buffer,
     const std::string& activation_fn) {
-    // Get tensors from weight cache
-    torch::Tensor concat_weight = weight_cache->get_concat_weight();
-    torch::Tensor active_down_weight = weight_cache->get_active_down_weight();
-
     const auto batch_size = input.size(0);
     const auto hidden_size = input.size(1);
     const auto intermediate_size = concat_weight.size(0) / 2;

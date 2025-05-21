@@ -52,22 +52,30 @@ public:
     // New method to select and store active weights based on non-zero indices from mask
     void update_active_weights(const torch::Tensor& mask) {
         // Get non-zero indices from the mask
-        torch::Tensor nonzero_indices = torch::nonzero(mask).select(1, 1);
-        
+        // torch::Tensor nonzero_indices = torch::nonzero(mask).select(1, 1);
+        int64_t sparse_size = mask.size(1);
+
         // Get tensors from blobs
         torch::Tensor gate_tensor = get_gate_tensor();
         torch::Tensor up_tensor = get_up_tensor();
         torch::Tensor down_tensor = get_down_tensor();
-        
-        // Select weights at the non-zero indices using index_select
-        auto active_gate = torch::index_select(gate_tensor, 0, nonzero_indices).detach();
-        auto active_up = torch::index_select(up_tensor, 0, nonzero_indices).detach();
-        
+
+        auto active_gate = gate_tensor.narrow(0, 0, sparse_size).detach();
+        auto active_up = up_tensor.narrow(0, 0, sparse_size).detach();
         // Concatenate gate and up weights
-        active_weights = torch::cat({active_gate, active_up}, 0).to(current_device);
+        active_weights = torch::cat({active_gate, active_up}, 0);
+        active_downs = down_tensor.narrow(1, 0, sparse_size).detach();
+
+
+        // // Select weights at the non-zero indices using index_select
+        // auto active_gate = torch::index_select(gate_tensor, 0, nonzero_indices).detach();
+        // auto active_up = torch::index_select(up_tensor, 0, nonzero_indices).detach();
         
-        // For down_weight, we index the second dimension (dim=1)
-        active_downs = torch::index_select(down_tensor, 1, nonzero_indices).detach().to(current_device);
+        // // Concatenate gate and up weights
+        // active_weights = torch::cat({active_gate, active_up}, 0).to(current_device);
+        
+        // // For down_weight, we index the second dimension (dim=1)
+        // active_downs = torch::index_select(down_tensor, 1, nonzero_indices).detach().to(current_device);
     }
     
     // Separate getters instead of structured bindings

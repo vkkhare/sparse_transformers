@@ -78,7 +78,11 @@ class LlamaSkipMLP(nn.Module):
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
         self.sparsity = sparsity
-        
+                       
+        # Create a dummy mask for initialization
+        mask_shape = [1, int(intermediate_size * sparsity)]
+        dummy_mask = torch.zeros(mask_shape, dtype=torch.bool)
+ 
         # Create and initialize weight cache directly
         self.weight_cache = WeightCache(            \
             dummy_mask, 
@@ -86,12 +90,8 @@ class LlamaSkipMLP(nn.Module):
             self.gate_proj.weight.detach(),
             self.up_proj.weight.detach(), 
             self.down_proj.weight.detach()
-            )
-        
-        # Create a dummy mask for initialization
-        mask_shape = [1, int(intermediate_size * sparsity)]
-        options = torch.TensorOptions().dtype(torch.bool)
-        dummy_mask = torch.zeros(mask_shape, options)
+        )
+
         
         # Register buffers for MLP computation
         self.register_buffer('down_proj_buffer', torch.zeros(14, hidden_size, requires_grad=False))
@@ -106,9 +106,10 @@ class LlamaSkipMLP(nn.Module):
         return super().to(*args, **kwargs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return sparse_mlp_forward(
-            self.weight_cache,
+        return sparse_mlp_forward(\
             x.detach(), 
+            self.weight_cache.get_concat_weight(),
+            self.weight_cache.get_active_down_weight(),
             self.down_proj_buffer,
             self.combined_proj_buffer,
             "silu"

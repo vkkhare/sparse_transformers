@@ -27,16 +27,18 @@ namespace py = pybind11;
 
 // Forward declarations of CPU/CUDA implementations
 torch::Tensor sparse_mlp_forward_cpu(
-    c10::intrusive_ptr<WeightCache> weight_cache,
     const torch::Tensor &input,
+    const torch::Tensor &concat_weight,
+    const torch::Tensor &active_down_weight,
     torch::Tensor &down_proj_buffer,
     torch::Tensor &combined_proj_buffer,
     const std::string &activation_fn);
 
 #ifdef WITH_CUDA
 torch::Tensor sparse_mlp_forward_cuda(
-    c10::intrusive_ptr<WeightCache> weight_cache,
     const torch::Tensor &input,
+    const torch::Tensor &concat_weight,
+    const torch::Tensor &active_down_weight,
     torch::Tensor &down_proj_buffer,
     torch::Tensor &combined_proj_buffer,
     const std::string &activation_fn);
@@ -44,8 +46,9 @@ torch::Tensor sparse_mlp_forward_cuda(
 
 // Main dispatch function
 torch::Tensor sparse_mlp_forward(
-    c10::intrusive_ptr<WeightCache> weight_cache,
     const torch::Tensor &input,
+    const torch::Tensor &concat_weight,
+    const torch::Tensor &active_down_weight,
     torch::Tensor &down_proj_buffer,
     torch::Tensor &combined_proj_buffer,
     const std::string &activation_fn)
@@ -55,21 +58,22 @@ torch::Tensor sparse_mlp_forward(
     if (input.is_cuda())
     {
 #ifdef WITH_CUDA
-        return sparse_mlp_forward_cuda(weight_cache, input, down_proj_buffer, combined_proj_buffer, activation_fn);
+        return sparse_mlp_forward_cuda(input, concat_weight, active_down_weight, down_proj_buffer, combined_proj_buffer, activation_fn);
 #else
         AT_ERROR("CUDA not available - cannot run on GPU");
 #endif
     }
     else
     {
-        return sparse_mlp_forward_cpu(weight_cache, input, down_proj_buffer, combined_proj_buffer, activation_fn);
+        return sparse_mlp_forward_cpu(input, concat_weight, active_down_weight, down_proj_buffer, combined_proj_buffer, activation_fn);
     }
 }
 
 // CPU implementation
 torch::Tensor sparse_mlp_forward_cpu(
-    c10::intrusive_ptr<WeightCache> weight_cache,
     const torch::Tensor &input,
+    const torch::Tensor &concat_weight,
+    const torch::Tensor &active_down_weight,
     torch::Tensor &down_proj_buffer,
     torch::Tensor &combined_proj_buffer,
     const std::string &activation_fn)
@@ -88,8 +92,6 @@ torch::Tensor sparse_mlp_forward_cpu(
     at::parallel_for(0, batch_size, 1, [&](int64_t start, int64_t end)
                      {
         for (int64_t batch_idx = start; batch_idx < end; batch_idx++) {
-            torch::Tensor concat_weight = weight_cache->get_concat_weight();
-            torch::Tensor active_down_weight = weight_cache->get_active_down_weight();
             int64_t gate_size = concat_weight.size(0) / 2;
             auto x_batch = input[batch_idx].unsqueeze(0).detach();
             
