@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <immintrin.h> // For SIMD operations
 
-class WeightCacheOptimized : public torch::CustomClassHolder
+class WeightCache : public torch::CustomClassHolder
 {
 private:
     // Define deleter as a struct to avoid std::function overhead
@@ -142,9 +142,9 @@ private:
     }
 
 public:
-    WeightCacheOptimized(const torch::Tensor &init_mask, int64_t hidden_size,
-                         const torch::Tensor &gate_weight, const torch::Tensor &up_weight,
-                         const torch::Tensor &down_weight)
+    WeightCache(const torch::Tensor &init_mask, int64_t hidden_size,
+                const torch::Tensor &gate_weight, const torch::Tensor &up_weight,
+                const torch::Tensor &down_weight)
     {
         init(init_mask, hidden_size, gate_weight, up_weight, down_weight);
     }
@@ -356,5 +356,5 @@ public:
     }
 
     // Destructor - no manual cleanup needed with smart pointers
-    ~WeightCacheOptimized() = default;
+    ~WeightCache() = default;
 };

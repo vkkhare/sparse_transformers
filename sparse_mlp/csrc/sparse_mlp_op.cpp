@@ -23,7 +23,7 @@ namespace py = pybind11;
 #include <c10/cuda/CUDAGuard.h>
 
 // Add custom headers
-#include "weight_cache_optimized.h"
+#include "weight_cache.h"
 
 // Forward declarations of CPU/CUDA implementations
 torch::Tensor sparse_mlp_forward_cpu(
@@ -121,11 +121,11 @@ torch::Tensor sparse_mlp_forward_cpu(
 TORCH_LIBRARY(sparse_mlp, m)
 {
     // Register the optimized weight cache
-    m.class_<WeightCacheOptimized>("WeightCacheOptimized")
+    m.class_<WeightCache>("WeightCache")
         .def(torch::init<const torch::Tensor &, int64_t, const torch::Tensor &, const torch::Tensor &, const torch::Tensor &>())
-        .def("update_active_weights", &WeightCacheOptimized::update_active_weights)
-        .def("get_concat_weight", &WeightCacheOptimized::get_concat_weight)
-        .def("get_active_down_weight", &WeightCacheOptimized::get_active_down_weight);
+        .def("update_active_weights", &WeightCache::update_active_weights)
+        .def("get_concat_weight", &WeightCache::get_concat_weight)
+        .def("get_active_down_weight", &WeightCache::get_active_down_weight);
 
     // Then register the operators that use the custom class
     m.def("forward", sparse_mlp_forward);
