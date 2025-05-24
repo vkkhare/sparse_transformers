@@ -23,7 +23,7 @@ namespace py = pybind11;
 #include <c10/cuda/CUDAGuard.h>
 
 // Add custom headers
-#include "weight_cache.h"
+#include "weight_cache_optimized.h"
 
 // Forward declarations of CPU/CUDA implementations
 torch::Tensor sparse_mlp_forward_cpu(
@@ -120,29 +120,12 @@ torch::Tensor sparse_mlp_forward_cpu(
 // Register TorchScript custom classes and operators
 TORCH_LIBRARY(sparse_mlp, m)
 {
-    // First register the custom class so it can be used in operator signatures
-    m.class_<WeightCache>("WeightCache")
+    // Register the optimized weight cache
+    m.class_<WeightCacheOptimized>("WeightCacheOptimized")
         .def(torch::init<const torch::Tensor &, int64_t, const torch::Tensor &, const torch::Tensor &, const torch::Tensor &>())
-        .def("update_active_weights", &WeightCache::update_active_weights)
-        .def("get_concat_weight", &WeightCache::get_concat_weight)
-        .def("get_active_down_weight", &WeightCache::get_active_down_weight)
-        .def("clear", &WeightCache::clear);
-    // .def_pickle(
-    //     // __getstate__
-    //     [](const c10::intrusive_ptr<WeightCache> &self)
-    //     {
-    //         return std::make_tuple(
-    //             self->get_concat_weight().detach().cpu(),
-    //             self->get_active_down_weight().detach().cpu());
-    //     },
-    //     // __setstate__
-    //     [](std::tuple<torch::Tensor, torch::Tensor> state)
-    //     {
-    //         auto self = c10::make_intrusive<WeightCache>();
-    //         auto options = torch::TensorOptions().device(std::get<0>(state).device()).dtype(std::get<0>(state).scalar_type());
-    //         self->store(std::get<0>(state), std::get<1>(state));
-    //         return self;
-    //     });
+        .def("update_active_weights", &WeightCacheOptimized::update_active_weights)
+        .def("get_concat_weight", &WeightCacheOptimized::get_concat_weight)
+        .def("get_active_down_weight", &WeightCacheOptimized::get_active_down_weight);
 
     // Then register the operators that use the custom class
     m.def("forward", sparse_mlp_forward);

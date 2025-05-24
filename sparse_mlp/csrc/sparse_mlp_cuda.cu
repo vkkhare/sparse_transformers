@@ -4,8 +4,6 @@
 #include <cuda_fp16.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <vector>
-#include "weight_cache.h"
-#include "timer.h"
 
 // Forward declarations with timing buffer
 template <typename scalar_t>

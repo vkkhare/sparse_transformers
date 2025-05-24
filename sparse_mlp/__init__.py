@@ -16,10 +16,14 @@ os.environ['MAX_JOBS'] = str(num_threads)
 torch.classes.load_library("./build/lib/sparse_mlp.so")
 
 sparse_mlp_forward = torch.ops.sparse_mlp.forward
-WeightCache = torch.classes.sparse_mlp.WeightCache
+WeightCacheOptimized = torch.classes.sparse_mlp.WeightCacheOptimized
+
+# For backward compatibility, alias WeightCache to the optimized version
+WeightCache = WeightCacheOptimized
 
 # Re-export for API compatibility
 __all__ = [
     'sparse_mlp_forward', 
-    'WeightCache'
+    'WeightCache',
+    'WeightCacheOptimized'
 ]

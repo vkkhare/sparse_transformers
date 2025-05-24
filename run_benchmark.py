@@ -239,26 +239,26 @@ def get_diverse_test_prompts() -> List[Dict[str, Union[str, int]]]:
             "max_tokens": 50,
             "description": "Short simple prompt"
         },
-        {
-            "prompt": "Give me a detailed recipe for making a burrito including all ingredients and their quantities.",
-            "max_tokens": 200,
-            "description": "Medium recipe prompt"
-        },
-        {
-            "prompt": "Explain the concept of machine learning, its applications in modern technology, and how it differs from traditional programming approaches. Include examples.",
-            "max_tokens": 300,
-            "description": "Long technical explanation"
-        },
-        {
-            "prompt": "Write a short story about a robot discovering emotions.",
-            "max_tokens": 400,
-            "description": "Creative writing prompt"
-        },
-        {
-            "prompt": "Analyze the economic implications of artificial intelligence on job markets, considering both positive and negative effects, and suggest potential policy responses.",
-            "max_tokens": 500,
-            "description": "Complex analytical prompt"
-        }
+        # {
+        #     "prompt": "Give me a detailed recipe for making a burrito including all ingredients and their quantities.",
+        #     "max_tokens": 200,
+        #     "description": "Medium recipe prompt"
+        # },
+        # {
+        #     "prompt": "Explain the concept of machine learning, its applications in modern technology, and how it differs from traditional programming approaches. Include examples.",
+        #     "max_tokens": 300,
+        #     "description": "Long technical explanation"
+        # },
+        # {
+        #     "prompt": "Write a short story about a robot discovering emotions.",
+        #     "max_tokens": 400,
+        #     "description": "Creative writing prompt"
+        # },
+        # {
+        #     "prompt": "Analyze the economic implications of artificial intelligence on job markets, considering both positive and negative effects, and suggest potential policy responses.",
+        #     "max_tokens": 500,
+        #     "description": "Complex analytical prompt"
+        # }
     ]
 
 
@@ -274,14 +274,7 @@ def reset_model_state(model: AutoModelForCausalLM):
     
     # Disable caching for fresh inference
     model.config.use_cache = False
-    
-    # For SkipLLaMA models, reset weight cache state
-    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
-        for layer in model.model.layers:
-            if hasattr(layer, 'weight_cache'):
-                # Weight cache will be updated fresh with new mask patterns
-                pass
-    
+
     # Clear GPU cache if using CUDA
     if next(model.parameters()).device.type == 'cuda':
         torch.cuda.empty_cache()

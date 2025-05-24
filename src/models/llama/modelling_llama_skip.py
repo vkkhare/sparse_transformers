@@ -29,7 +29,7 @@ import torch.utils.cpp_extension
 import torch
 from sparse_mlp import (
     sparse_mlp_forward,
-    WeightCache
+    WeightCacheOptimized
 )
 
 from src.models.llama.configuration_llama_skip import LlamaSkipConnectionConfig
@@ -72,20 +72,17 @@ class FastLoRAProjection(nn.Module):
         return self.output
 
 class LlamaSkipMLP(nn.Module):
-    def __init__(self, hidden_size: int, intermediate_size: int, sparsity: float, bias: bool = False):
+    def __init__(self, hidden_size: int, intermediate_size: int, sparsity: float, bias: bool = False, use_optimized_cache: bool = True):
         super().__init__()
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=bias)
         self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=bias)
         self.sparsity = sparsity
-                       
-        # Create a dummy mask for initialization
-        mask_shape = [1, int(intermediate_size * sparsity)]
-        dummy_mask = torch.zeros(mask_shape, dtype=torch.bool)
- 
-        # Create and initialize weight cache directly
-        self.weight_cache = WeightCache(            \
-            dummy_mask, 
+        self.init_mask = torch.ones(intermediate_size, dtype=torch.bool, device=self.gate_proj.weight.device)
+        self.init_mask[int(intermediate_size * sparsity):] = 0
+        # Create and initialize weight cache (always use optimized version)
+        self.weight_cache = WeightCacheOptimized(   
+            self.init_mask,
             hidden_size,
             self.gate_proj.weight.detach(),
             self.up_proj.weight.detach(), 
@@ -117,11 +114,14 @@ class LlamaSkipMLP(nn.Module):
 class LlamaSkipDecoderLayer(LlamaDecoderLayer):
     def __init__(self, config: LlamaSkipConnectionConfig, layer_idx: int):
         super().__init__(config, layer_idx)
+        # Use optimized cache by default (can be configured via config if needed)
+        use_optimized_cache = getattr(config, 'use_optimized_weight_cache', True)
         self.mlp = LlamaSkipMLP(
             config.hidden_size,
             config.intermediate_size,
             config.sparsity,
-            config.mlp_bias
+            config.mlp_bias,
+            use_optimized_cache=use_optimized_cache
         )
         self.layer_idx = layer_idx
         self.sparsity = config.sparsity
@@ -155,20 +155,63 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        import time  # Add timing import
+        
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         # Reshape hidden states for batch processing
         hidden_states_reshaped = hidden_states.view(-1, hidden_states.shape[-1])
         
-        # LoRA projection to get importance scores
+        # Initialize timing dict if not exists
+        if not hasattr(self, 'timing_stats'):
+            self.timing_stats = {
+                'lora_projection': [],
+                'quantile_computation': [],
+                'mask_creation': [],
+                'weight_cache_update': [],
+                'total_sparsity': [],
+                'mlp_forward': []
+            }
+        
+        # Start total sparsity timing
+        total_start = time.perf_counter()
+        
+        # 1. LoRA projection to get importance scores
+        lora_start = time.perf_counter()
         lora_proj_scores = self.mlp_lora_proj(hidden_states_reshaped)
+        lora_time = time.perf_counter() - lora_start
+        self.timing_stats['lora_projection'].append(lora_time * 1000)  # Convert to ms
         
-        # Use 95th percentile threshold - selects exactly top sparsity% of values
-        threshold = torch.quantile(lora_proj_scores, 1-self.sparsity, dim=1, keepdim=True)
+        # 2. Fast threshold computation - Use kthvalue instead of quantile
+        quantile_start = time.perf_counter()
+        # Calculate k for kth smallest value to get top sparsity% (keep values > threshold)
+        k = int(lora_proj_scores.size(1) * (1 - self.sparsity))
+        if k > 0 and k < lora_proj_scores.size(1):
+            # Get kth smallest value efficiently (no full sorting needed)
+            kth_values = torch.kthvalue(lora_proj_scores, k, dim=1, keepdim=True)[0]
+            threshold = kth_values
+        else:
+            # Fallback for edge case
+            threshold = torch.quantile(lora_proj_scores, 1-self.sparsity, dim=1, keepdim=True)
+        quantile_time = time.perf_counter() - quantile_start
+        self.timing_stats['quantile_computation'].append(quantile_time * 1000)  # Now measures kthvalue time
+        
+        # 3. Binary mask creation
+        mask_start = time.perf_counter()
         binary_mask = (lora_proj_scores > threshold).bool()
+        mask_time = time.perf_counter() - mask_start
+        self.timing_stats['mask_creation'].append(mask_time * 1000)
         
-        # Update weight cache with binary mask
-        self.weight_cache.update_active_weights(binary_mask)
+        # 4. Weight cache update
+        cache_start = time.perf_counter()
+        # Normalize 2D mask to 1D by taking union across batch dimension
+        self.weight_cache.update_active_weights(binary_mask.any(dim=0))  # [batch_size, intermediate_size] → [intermediate_size]
+        cache_time = time.perf_counter() - cache_start
+        self.timing_stats['weight_cache_update'].append(cache_time * 1000)
+        
+        # Total sparsity selection time
+        total_time = time.perf_counter() - total_start
+        self.timing_stats['total_sparsity'].append(total_time * 1000)
 
         # Self Attention
         hidden_states, self_attn_weights = self.self_attn(
@@ -187,8 +230,12 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        # Pass through MLP
+        # Pass through MLP with timing
+        mlp_start = time.perf_counter()
         hidden_states = self.mlp(hidden_states.view(-1, hidden_states.shape[-1]))
+        mlp_time = time.perf_counter() - mlp_start
+        self.timing_stats['mlp_forward'].append(mlp_time * 1000)  # Convert to ms
+        
         hidden_states = hidden_states.view(residual.shape)
         hidden_states = residual + hidden_states
         outputs = (hidden_states,)
