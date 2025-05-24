@@ -64,12 +64,12 @@ class FastLoRAProjection(nn.Module):
             self.output.resize_(batch_size, self.intermediate_size)
             self.output = self.output.to(dtype=dtype)
    
-    def forward(self, x, mask):
+    def forward(self, x):
         batch_size = x.size(0)
         self._resize_buffers(batch_size, x.dtype)
         torch.mm(x, self.down.weight.t(), out=self.intermediate)
         torch.mm(self.intermediate, self.up.weight.t(), out=self.output)
-        return self.output.mul(mask)
+        return self.output
 
 class LlamaSkipMLP(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int, sparsity: float, bias: bool = False):
@@ -92,10 +92,9 @@ class LlamaSkipMLP(nn.Module):
             self.down_proj.weight.detach()
         )
 
-        
-        # Register buffers for MLP computation
-        self.register_buffer('down_proj_buffer', torch.zeros(14, hidden_size, requires_grad=False))
-        self.register_buffer('combined_proj_buffer', torch.zeros(14, 2 * int(intermediate_size * sparsity), requires_grad=False))  # max_gate_size = 1638
+        # Register buffers - start with reasonable size and ensure they can be resized
+        self.register_buffer('down_proj_buffer', torch.zeros(1, hidden_size, requires_grad=False))
+        self.register_buffer('combined_proj_buffer', torch.zeros(1, 2 * int(intermediate_size * sparsity), requires_grad=False))
 
     def to(self, *args, **kwargs):
         # Move buffers to same device as model when .to() is called
@@ -132,8 +131,7 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
             config.intermediate_size,
             dtype=torch.bool
         ).contiguous())
-        self.mlp_mask[:int(config.intermediate_size * self.sparsity)] = True
-        
+
         # Create LoRA projection
         self.lora_size = int(config.intermediate_size * 0.04)
         self.mlp_lora_proj = FastLoRAProjection(
@@ -144,13 +142,6 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
         
         # Simply use the weight cache from the MLP
         self.weight_cache = self.mlp.weight_cache
-
-    def to(self, *args, **kwargs):
-        # Move mask to same device as model when .to() is called
-        device = args[0] if args else kwargs.get('device')
-        if device:
-            self.mlp_mask = self.mlp_mask.to(device)
-        return super().to(*args, **kwargs)
 
     def forward(
         self,
@@ -169,13 +160,15 @@ class LlamaSkipDecoderLayer(LlamaDecoderLayer):
         # Reshape hidden states for batch processing
         hidden_states_reshaped = hidden_states.view(-1, hidden_states.shape[-1])
         
-        # LoRA projection
-        lora_proj_mask = self.mlp_lora_proj(hidden_states_reshaped, self.mlp_mask)
+        # LoRA projection to get importance scores
+        lora_proj_scores = self.mlp_lora_proj(hidden_states_reshaped)
         
-        # Only compute active weights based on the mask using explicit weight cache
-        self.weight_cache.update_active_weights(
-            lora_proj_mask[:, :int(self.mlp.gate_proj.weight.shape[0] * self.sparsity)]
-        )
+        # Use 95th percentile threshold - selects exactly top sparsity% of values
+        threshold = torch.quantile(lora_proj_scores, 1-self.sparsity, dim=1, keepdim=True)
+        binary_mask = (lora_proj_scores > threshold).bool()
+        
+        # Update weight cache with binary mask
+        self.weight_cache.update_active_weights(binary_mask)
 
         # Self Attention
         hidden_states, self_attn_weights = self.self_attn(

@@ -5,13 +5,82 @@ import platform
 import psutil
 import time
 import os
-from typing import List, Dict, Tuple, Optional
+import threading
+import statistics
+from typing import List, Dict, Tuple, Optional, Union
+import numpy as np
 
 import torch
 from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
 from transformers.models.llama.modeling_llama import LlamaMLP
 from src.models.llama.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection
 from src.models.llama.configuration_llama_skip import LlamaSkipConnectionConfig
+
+
+class GPUMonitor:
+    """Monitor GPU usage during inference."""
+    
+    def __init__(self, monitoring_interval: float = 0.1):
+        self.monitoring_interval = monitoring_interval
+        self._gpu_memory_usage = []
+        self._gpu_utilization = []
+        self._is_monitoring = False
+        self._monitor_thread = None
+        
+    def _monitor_gpu(self):
+        """Background monitoring of GPU metrics."""
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            
+            while self._is_monitoring:
+                # Get memory info
+                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                memory_used_mb = memory_info.used / 1024**2
+                
+                # Get utilization
+                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                gpu_util = utilization.gpu
+                
+                self._gpu_memory_usage.append(memory_used_mb)
+                self._gpu_utilization.append(gpu_util)
+                
+                time.sleep(self.monitoring_interval)
+                
+        except ImportError:
+            # Fallback to torch methods if pynvml not available
+            while self._is_monitoring:
+                if torch.cuda.is_available():
+                    memory_used_mb = torch.cuda.memory_allocated() / 1024**2
+                    self._gpu_memory_usage.append(memory_used_mb)
+                time.sleep(self.monitoring_interval)
+    
+    def start(self):
+        """Start GPU monitoring."""
+        self._is_monitoring = True
+        self._gpu_memory_usage.clear()
+        self._gpu_utilization.clear()
+        self._monitor_thread = threading.Thread(target=self._monitor_gpu)
+        self._monitor_thread.start()
+    
+    def stop(self):
+        """Stop GPU monitoring."""
+        self._is_monitoring = False
+        if self._monitor_thread:
+            self._monitor_thread.join()
+    
+    def get_peak_usage(self) -> Dict:
+        """Get peak GPU usage metrics."""
+        if not self._gpu_memory_usage:
+            return {"peak_gpu_memory_mb": 0, "p90_gpu_utilization": 0}
+        
+        return {
+            "peak_gpu_memory_mb": max(self._gpu_memory_usage),
+            "p90_gpu_memory_mb": np.percentile(self._gpu_memory_usage, 90),
+            "max_gpu_utilization": max(self._gpu_utilization) if self._gpu_utilization else 0,
+            "p90_gpu_utilization": np.percentile(self._gpu_utilization, 90) if self._gpu_utilization else 0
+        }
 
 
 def parse_args() -> argparse.Namespace:
@@ -162,100 +231,357 @@ def setup_cuda_debugging(verbose: bool = False):
         torch.cuda.memory._record_memory_history(max_entries=10000)
 
 
-def run_inference(
-    model: AutoModelForCausalLM,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    tokenizer: AutoTokenizer,
-    model_device: Optional[torch.device],
-    num_runs: int = 50,
-    verbose: bool = False
-) -> Tuple[List[float], List[float]]:
-    """Run inference benchmark on the model."""    
-    # Setup model on device
-    model = model.to(model_device).to(torch.float16 if model_device.type == 'cuda' else torch.float32)
-    base_input_ids = input_ids.to(model_device)
-    base_attention_mask = attention_mask.to(model_device)
-    
-    print(f"\nModel type: {type(model)}")
-    print(f"Model device: {model_device}")
-    print(f"Model path: {model.config._name_or_path}")
-    
-    times = []
-    mlp_times = []
+def get_diverse_test_prompts() -> List[Dict[str, Union[str, int]]]:
+    """Get diverse test prompts for comprehensive benchmarking."""
+    return [
+        {
+            "prompt": "Hello, how are you?",
+            "max_tokens": 50,
+            "description": "Short simple prompt"
+        },
+        {
+            "prompt": "Give me a detailed recipe for making a burrito including all ingredients and their quantities.",
+            "max_tokens": 200,
+            "description": "Medium recipe prompt"
+        },
+        {
+            "prompt": "Explain the concept of machine learning, its applications in modern technology, and how it differs from traditional programming approaches. Include examples.",
+            "max_tokens": 300,
+            "description": "Long technical explanation"
+        },
+        {
+            "prompt": "Write a short story about a robot discovering emotions.",
+            "max_tokens": 400,
+            "description": "Creative writing prompt"
+        },
+        {
+            "prompt": "Analyze the economic implications of artificial intelligence on job markets, considering both positive and negative effects, and suggest potential policy responses.",
+            "max_tokens": 500,
+            "description": "Complex analytical prompt"
+        }
+    ]
 
-    # Add MLP timing hooks if needed
-    if model_device.type == 'cpu' and verbose:
-        def forward_hook(module, input, output):
-            start = time.perf_counter()
-            result = module.forward(*input)
-            end = time.perf_counter()
-            mlp_times.append(end - start)
-            return result
-            
-        for module in model.modules():
-            if isinstance(module, (LlamaSkipMLP, LlamaMLP)):
-                module.register_forward_hook(forward_hook)
 
-    # Warmup for CUDA
-    if model_device.type == 'cuda':
-        for _ in range(3):
-            with torch.amp.autocast(device_type='cuda'):
-                with torch.no_grad():
-                    _ = model(base_input_ids, attention_mask=base_attention_mask, return_dict=False)
-        torch.cuda.synchronize()
+def reset_model_state(model: AutoModelForCausalLM):
+    """Reset model state between independent sequences."""
+    # Clear past key values cache
+    if hasattr(model, 'past_key_values'):
+        model.past_key_values = None
+    
+    # Reset internal state
+    if hasattr(model, '_past_length'):
+        model._past_length = 0
+    
+    # Disable caching for fresh inference
+    model.config.use_cache = False
+    
+    # For SkipLLaMA models, reset weight cache state
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        for layer in model.model.layers:
+            if hasattr(layer, 'weight_cache'):
+                # Weight cache will be updated fresh with new mask patterns
+                pass
+    
+    # Clear GPU cache if using CUDA
+    if next(model.parameters()).device.type == 'cuda':
         torch.cuda.empty_cache()
     
+    # Trigger garbage collection
     gc.collect()
 
-    # Main inference loop
-    for i in range(num_runs):
-        random_shift = torch.randint(-100, 100, base_input_ids.shape, device=model_device)
-        input_ids = torch.clamp(base_input_ids + random_shift, min=0, max=tokenizer.vocab_size-1)
-        
-        # Reset model state
-        if hasattr(model, 'past_key_values'):
-            model.past_key_values = None
-        model._past_length = 0
-        model.config.use_cache = False
 
-        if model_device.type == 'cuda':
-            torch.cuda.synchronize()
+def benchmark_single_prompt(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompt: str,
+    max_new_tokens: int,
+    device: torch.device,
+    temperature: float = 0.7
+) -> Dict:
+    """Benchmark a single prompt for TTFT and TPS metrics."""
+    
+    # Reset model state for independent sequence
+    reset_model_state(model)
+    
+    # Tokenize input
+    inputs = tokenizer(prompt, return_tensors='pt', padding=True, truncation=True, max_length=512)
+    input_ids = inputs['input_ids'].to(device)
+    attention_mask = inputs['attention_mask'].to(device)
+    
+    input_tokens = input_ids.shape[1]
+    
+    # Setup GPU monitoring
+    gpu_monitor = None
+    if device.type == 'cuda':
+        gpu_monitor = GPUMonitor()
+        gpu_monitor.start()
+    
+    # Setup CUDA events for accurate timing
+    if device.type == 'cuda':
+        start_event = torch.cuda.Event(enable_timing=True)
+        first_token_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        torch.cuda.synchronize()
+        start_event.record()
+    else:
+        start_time = time.perf_counter()
+    
+    # Generate tokens with streaming to measure TTFT
+    generated_tokens = []
+    first_token_time = None
+    
+    model.eval()
+    with torch.no_grad():
+        current_input_ids = input_ids
+        current_attention_mask = attention_mask
         
-        start = time.perf_counter()
-        
-        with torch.no_grad():
-            if model_device.type == 'cuda':
+        for step in range(max_new_tokens):
+            # Forward pass
+            if device.type == 'cuda':
                 with torch.amp.autocast(device_type='cuda'):
-                    _ = model(input_ids, attention_mask=base_attention_mask, return_dict=False)
+                    outputs = model(current_input_ids, attention_mask=current_attention_mask, return_dict=True)
             else:
-                _ = model(input_ids, attention_mask=base_attention_mask, return_dict=False)
-        
-        if model_device.type == 'cuda':
-            torch.cuda.synchronize()
+                outputs = model(current_input_ids, attention_mask=current_attention_mask, return_dict=True)
             
-        times.append(time.perf_counter() - start)
+            # Get next token
+            logits = outputs.logits[:, -1, :]
+            
+            # Apply temperature sampling
+            if temperature > 0:
+                logits = logits / temperature
+                probs = torch.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+            else:
+                next_token = torch.argmax(logits, dim=-1, keepdim=True)
+            
+            # Record first token time
+            if step == 0:
+                if device.type == 'cuda':
+                    first_token_event.record()
+                    torch.cuda.synchronize()
+                else:
+                    first_token_time = time.perf_counter() - start_time
+            
+            generated_tokens.append(next_token.item())
+            
+            # Check for EOS token
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+            
+            # Update input for next iteration
+            current_input_ids = torch.cat([current_input_ids, next_token], dim=-1)
+            current_attention_mask = torch.cat([
+                current_attention_mask, 
+                torch.ones(1, 1, device=device, dtype=current_attention_mask.dtype)
+            ], dim=-1)
+    
+    # Record end time
+    if device.type == 'cuda':
+        end_event.record()
+        torch.cuda.synchronize()
         
-        # Periodic cache clearing
-        if i % 10 == 0:
-            if model_device.type == 'cuda':
-                torch.cuda.empty_cache()
-            gc.collect()
+        # Calculate times using CUDA events (in milliseconds)
+        total_time_ms = start_event.elapsed_time(end_event)
+        first_token_time_ms = start_event.elapsed_time(first_token_event)
+        generation_time_ms = first_token_event.elapsed_time(end_event)
+        
+        # Convert to seconds
+        total_time = total_time_ms / 1000
+        first_token_time = first_token_time_ms / 1000
+        generation_time = generation_time_ms / 1000
+    else:
+        total_time = time.perf_counter() - start_time
+        generation_time = total_time - first_token_time
+    
+    # Stop GPU monitoring
+    gpu_usage = {}
+    if gpu_monitor:
+        gpu_monitor.stop()
+        gpu_usage = gpu_monitor.get_peak_usage()
+    
+    output_tokens = len(generated_tokens)
+    total_tokens = input_tokens + output_tokens
+    
+    # Calculate metrics
+    results = {
+        'input_tokens': input_tokens,
+        'output_tokens': output_tokens,
+        'total_tokens': total_tokens,
+        'time_to_first_token_seconds': first_token_time,
+        'total_generation_time_seconds': generation_time,
+        'total_time_seconds': total_time,
+        'tokens_per_second': total_tokens / total_time if total_time > 0 else 0,
+        'output_tokens_per_second': output_tokens / generation_time if generation_time > 0 else 0,
+        'input_tokens_per_second': input_tokens / first_token_time if first_token_time > 0 else 0,
+        **gpu_usage
+    }
+    
+    return results
 
-    return times, mlp_times
+
+def benchmark_language_model(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    test_prompts: List[Dict],
+    device: torch.device,
+    temperature: float = 0.7
+) -> Dict:
+    """Benchmark language model across multiple prompts."""
+    
+    all_results = []
+    
+    print(f"\nRunning comprehensive benchmark on {len(test_prompts)} prompts...")
+    
+    for i, prompt_config in enumerate(test_prompts):
+        print(f"\nPrompt {i+1}/{len(test_prompts)}: {prompt_config['description']}")
+        print(f"Max tokens: {prompt_config['max_tokens']}")
+        
+        try:
+            result = benchmark_single_prompt(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=prompt_config['prompt'],
+                max_new_tokens=prompt_config['max_tokens'],
+                device=device,
+                temperature=temperature
+            )
+            
+            result['prompt_description'] = prompt_config['description']
+            all_results.append(result)
+            
+            # Print individual results
+            print(f"TTFT: {result['time_to_first_token_seconds']:.3f}s")
+            print(f"Output TPS: {result['output_tokens_per_second']:.1f}")
+            print(f"Total TPS: {result['tokens_per_second']:.1f}")
+            if 'peak_gpu_memory_mb' in result:
+                print(f"Peak GPU Memory: {result['peak_gpu_memory_mb']:.1f}MB")
+            
+        except Exception as e:
+            print(f"Error benchmarking prompt {i+1}: {str(e)}")
+            continue
+    
+    if not all_results:
+        return {}
+    
+    # Aggregate results
+    metrics = ['time_to_first_token_seconds', 'tokens_per_second', 'output_tokens_per_second']
+    gpu_metrics = ['peak_gpu_memory_mb', 'p90_gpu_utilization']
+    
+    aggregated = {}
+    
+    for metric in metrics:
+        values = [r[metric] for r in all_results if metric in r and r[metric] > 0]
+        if values:
+            aggregated[f'p50_{metric}'] = statistics.median(values)
+            aggregated[f'p90_{metric}'] = np.percentile(values, 90)
+            aggregated[f'mean_{metric}'] = statistics.mean(values)
+    
+    for metric in gpu_metrics:
+        values = [r[metric] for r in all_results if metric in r]
+        if values:
+            aggregated[f'max_{metric}'] = max(values)
+            aggregated[f'mean_{metric}'] = statistics.mean(values)
+    
+    aggregated['total_prompts'] = len(all_results)
+    aggregated['individual_results'] = all_results
+    
+    return aggregated
 
 
-def print_results(name: str, times: List[float], device_type: str) -> None:
-    """Print benchmark results."""
-    print(f"\n{name} {device_type} Results:")
-    print(f"Average time: {sum(times)/len(times):.3f}s")
-    print(f"Min time: {min(times):.3f}s")
-    print(f"Max time: {max(times):.3f}s")
-    print(f"Individual times: {[f'{t:.3f}s' for t in times]}")
+def run_inference(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    test_prompts: List[Dict],
+    model_device: torch.device,
+    model_name: str,
+    verbose: bool = False
+) -> Dict:
+    """Run comprehensive inference benchmark."""
+    
+    print(f"\n=== Benchmarking {model_name} ===")
+    
+    # Move model to device with appropriate precision
+    model = model.to(model_device)
+    if model_device.type == 'cuda':
+        model = model.to(torch.float16)
+    else:
+        model = model.to(torch.float32)
+    
+    print(f"Model device: {model_device}")
+    print(f"Model dtype: {next(model.parameters()).dtype}")
+    
+    # Warmup runs
+    print("Warming up model...")
+    warmup_prompt = test_prompts[0]
+    for _ in range(2):
+        try:
+            benchmark_single_prompt(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=warmup_prompt['prompt'],
+                max_new_tokens=min(50, warmup_prompt['max_tokens']),
+                device=model_device,
+                temperature=0.7
+            )
+        except Exception as e:
+            print(f"Warmup failed: {e}")
+    
+    # Main benchmark
+    results = benchmark_language_model(
+        model=model,
+        tokenizer=tokenizer,
+        test_prompts=test_prompts,
+        device=model_device,
+        temperature=0.7
+    )
+    
+    return results
+
+
+def print_comprehensive_results(results: Dict, model_name: str):
+    """Print comprehensive benchmark results."""
+    print(f"\n{'='*60}")
+    print(f"📊 {model_name} Benchmark Results")
+    print(f"{'='*60}")
+    
+    if not results:
+        print("❌ No results available")
+        return
+    
+    print(f"📈 Performance Metrics (n={results.get('total_prompts', 0)} prompts):")
+    print("-" * 40)
+    
+    # TTFT metrics
+    if 'p50_time_to_first_token_seconds' in results:
+        print(f"⚡ Time to First Token:")
+        print(f"   P50: {results['p50_time_to_first_token_seconds']:.3f}s")
+        print(f"   P90: {results['p90_time_to_first_token_seconds']:.3f}s")
+        print(f"   Mean: {results['mean_time_to_first_token_seconds']:.3f}s")
+    
+    # TPS metrics
+    if 'p50_output_tokens_per_second' in results:
+        print(f"🚀 Output Generation Speed:")
+        print(f"   P50: {results['p50_output_tokens_per_second']:.1f} tokens/sec")
+        print(f"   P90: {results['p90_output_tokens_per_second']:.1f} tokens/sec")
+        print(f"   Mean: {results['mean_output_tokens_per_second']:.1f} tokens/sec")
+    
+    if 'p50_tokens_per_second' in results:
+        print(f"📊 Total Throughput:")
+        print(f"   P50: {results['p50_tokens_per_second']:.1f} tokens/sec")
+        print(f"   P90: {results['p90_tokens_per_second']:.1f} tokens/sec")
+        print(f"   Mean: {results['mean_tokens_per_second']:.1f} tokens/sec")
+    
+    # GPU metrics
+    if 'max_peak_gpu_memory_mb' in results:
+        print(f"🖥️  GPU Usage:")
+        print(f"   Max Memory: {results['max_peak_gpu_memory_mb']:.1f}MB")
+        print(f"   Mean Memory: {results['mean_peak_gpu_memory_mb']:.1f}MB")
+        if 'max_p90_gpu_utilization' in results:
+            print(f"   Max Utilization: {results['max_p90_gpu_utilization']:.1f}%")
 
 
 def main():
-    """Main function to run the benchmark."""
+    """Main function to run the comprehensive benchmark."""
     args = parse_args()
     
     # Setup CUDA debugging if using CUDA
@@ -278,67 +604,59 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    scripted_model = LlamaSkipConnectionForCausalLM.from_pretrained(
-        checkpoint, 
-        config=config
-    ).to(skip_device)
+    # Load models
+    skip_model = LlamaSkipConnectionForCausalLM.from_pretrained(checkpoint, config=config)
+    standard_model = AutoModelForCausalLM.from_pretrained(checkpoint)
 
-    # Script CPU modules if needed
-    if args.device == 'cpu':
-        for module in scripted_model.modules():
-            if isinstance(module, (LlamaSkipMLP, FastLoRAProjection)):
-                module.eval()
-                try:
-                    scripted_module = torch.jit.script(module)
-                    module.forward = scripted_module.forward
-                except Exception as e:
-                    print(f"Failed to script module {type(module).__name__}: {str(e)}")
-
-    # Prepare input
-    sequence = "Give recipe of burrito including all the ingredients and their quantity."
-    inputs = tokenizer(
-        sequence, 
-        return_tensors='pt',
-        padding=True,
-        truncation=True,
-        max_length=512
-    )
-
-    # Create pipelines
-    llamaSkipScriptedPipe = create_pipeline(scripted_model, tokenizer, skip_device)
-    llamaPipe = create_pipeline(checkpoint, tokenizer, standard_device)
+    # Get test prompts
+    test_prompts = get_diverse_test_prompts()
+    
+    print(f"\n🎯 Running comprehensive benchmark with {len(test_prompts)} diverse prompts...")
+    print(f"📝 Test prompts: {[p['description'] for p in test_prompts]}")
 
     # Run benchmarks
-    print(f"\nRunning {args.device.upper()} inference benchmarks...")
-    print("-" * 50)
-
-    print("Warming up models...")
-    _, _ = run_inference(llamaPipe.model, inputs["input_ids"], inputs["attention_mask"], 
-                        tokenizer, standard_device, num_runs=2, verbose=args.verbose)
-    _, _ = run_inference(llamaSkipScriptedPipe.model, inputs["input_ids"], inputs["attention_mask"], 
-                        tokenizer, skip_device, num_runs=2, verbose=args.verbose)
-
-    skip_scripted_times, skip_scripted_mlp_times = run_inference(
-        llamaSkipScriptedPipe.model, inputs["input_ids"], inputs["attention_mask"], 
-        tokenizer, skip_device, args.num_runs, args.verbose
+    skip_results = run_inference(
+        model=skip_model,
+        tokenizer=tokenizer,
+        test_prompts=test_prompts,
+        model_device=skip_device,
+        model_name="SkipLLaMA",
+        verbose=args.verbose
     )
 
-    std_times, std_mlp_times = run_inference(
-        llamaPipe.model, inputs["input_ids"], inputs["attention_mask"], 
-        tokenizer, standard_device, args.num_runs, args.verbose
+    standard_results = run_inference(
+        model=standard_model,
+        tokenizer=tokenizer,
+        test_prompts=test_prompts,
+        model_device=standard_device,
+        model_name="Standard LLaMA",
+        verbose=args.verbose
     )
 
     # Print results
-    if device.type == 'cpu' and args.verbose:
-        print_results("SkipLLaMA Scripted MLP", skip_scripted_mlp_times, args.device.upper())
-        print_results("Standard LLaMA MLP", std_mlp_times, args.device.upper())
-
-    print_results("SkipLLaMA Scripted", skip_scripted_times, args.device.upper())
-    print_results("Standard LLaMA", std_times, args.device.upper())
+    print_comprehensive_results(skip_results, "SkipLLaMA")
+    print_comprehensive_results(standard_results, "Standard LLaMA")
     
-    speedup = (sum(std_times)/len(std_times))/(sum(skip_scripted_times)/len(skip_scripted_times))
-    print(f"\n{args.device.upper()} Speedups:")
-    print(f"Scripted vs Standard: {speedup:.2f}x")
+    # Calculate speedups
+    if skip_results and standard_results:
+        print(f"\n{'='*60}")
+        print(f"🏁 Performance Comparison")
+        print(f"{'='*60}")
+        
+        if ('mean_time_to_first_token_seconds' in skip_results and 
+            'mean_time_to_first_token_seconds' in standard_results):
+            ttft_speedup = standard_results['mean_time_to_first_token_seconds'] / skip_results['mean_time_to_first_token_seconds']
+            print(f"⚡ TTFT Speedup: {ttft_speedup:.2f}x")
+        
+        if ('mean_output_tokens_per_second' in skip_results and 
+            'mean_output_tokens_per_second' in standard_results):
+            tps_speedup = skip_results['mean_output_tokens_per_second'] / standard_results['mean_output_tokens_per_second']
+            print(f"🚀 Output TPS Speedup: {tps_speedup:.2f}x")
+        
+        if ('mean_tokens_per_second' in skip_results and 
+            'mean_tokens_per_second' in standard_results):
+            total_speedup = skip_results['mean_tokens_per_second'] / standard_results['mean_tokens_per_second']
+            print(f"📊 Total Throughput Speedup: {total_speedup:.2f}x")
 
 
 if __name__ == "__main__":

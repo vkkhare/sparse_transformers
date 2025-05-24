@@ -87,6 +87,10 @@ torch::Tensor sparse_mlp_forward_cpu(
     {
         down_proj_buffer.resize_({batch_size, hidden_size});
     }
+    if (combined_proj_buffer.size(0) != batch_size)
+    {
+        combined_proj_buffer.resize_({batch_size, 2 * int(concat_weight.size(0))});
+    }
 
     // Process each batch item in parallel
     at::parallel_for(0, batch_size, 1, [&](int64_t start, int64_t end)
