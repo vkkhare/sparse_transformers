@@ -7,92 +7,140 @@ CPU: x86_64
 Physical cores: 8
 Total cores: 8
 Max CPU frequency: 0MHz
-Current CPU frequency: 2543MHz
-RAM: Total=54.92GB, Available=46.15GB (16.0% used)
+Current CPU frequency: 2546MHz
+RAM: Total=54.92GB, Available=45.06GB (18.0% used)
 
 PyTorch version: 2.5.1
 CUDA version: 12.4
 --------------------------------------------------
 Using devices: cpu, cpu, cpu
-Loading checkpoint shards: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:05<00:00,  2.54s/it]
-Loading checkpoint shards: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:01<00:00,  1.29it/s]
 
-🎯 Running comprehensive benchmark with 1 diverse prompts...
-📝 Test prompts: ['Short simple prompt']
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]
+Loading checkpoint shards:  50%|█████     | 1/2 [00:02<00:02,  2.69s/it]
+Loading checkpoint shards: 100%|██████████| 2/2 [00:03<00:00,  1.82s/it]
+Loading checkpoint shards: 100%|██████████| 2/2 [00:03<00:00,  1.95s/it]
+
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]
+Loading checkpoint shards:  50%|█████     | 1/2 [00:00<00:00,  1.39it/s]
+Loading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.54it/s]
+Loading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.52it/s]
+
+🎯 Running comprehensive benchmark with 5 diverse prompts...
+📝 Test prompts: ['Short simple prompt', 'Medium recipe prompt', 'Long technical explanation', 'Creative writing prompt', 'Complex analytical prompt']
 
 === Benchmarking SkipLLaMA ===
 Model device: cpu
 Model dtype: torch.float32
 Warming up model...
 
-Running comprehensive benchmark on 1 prompts...
+Running comprehensive benchmark on 5 prompts...
 
-Prompt 1/1: Short simple prompt
+Prompt 1/5: Short simple prompt
 Max tokens: 50
-TTFT: 0.589s
-Output TPS: 1.1
+TTFT: 0.593s
+Output TPS: 1.2
 Total TPS: 1.3
+
+Prompt 2/5: Medium recipe prompt
+Max tokens: 200
+TTFT: 0.626s
+Output TPS: 0.5
+Total TPS: 0.5
+
+Prompt 3/5: Long technical explanation
+Max tokens: 300
+TTFT: 1.008s
+Output TPS: 0.4
+Total TPS: 0.4
+
+Prompt 4/5: Creative writing prompt
+Max tokens: 400
+TTFT: 0.615s
+Output TPS: 0.3
+Total TPS: 0.3
+
+Prompt 5/5: Complex analytical prompt
+Max tokens: 500
+TTFT: 0.738s
+Output TPS: 0.2
+Total TPS: 0.2
 
 === Benchmarking Standard LLaMA ===
 Model device: cpu
 Model dtype: torch.float32
 Warming up model...
 
-Running comprehensive benchmark on 1 prompts...
+Running comprehensive benchmark on 5 prompts...
 
-Prompt 1/1: Short simple prompt
+Prompt 1/5: Short simple prompt
 Max tokens: 50
-TTFT: 1.920s
-Output TPS: 0.7
+TTFT: 1.304s
+Output TPS: 0.6
 Total TPS: 0.7
+
+Prompt 2/5: Medium recipe prompt
+Max tokens: 200
+TTFT: 1.147s
+Output TPS: 0.3
+Total TPS: 0.4
+
+Prompt 3/5: Long technical explanation
+Max tokens: 300
+TTFT: 1.279s
+Output TPS: 0.3
+Total TPS: 0.3
+
+Prompt 4/5: Creative writing prompt
+Max tokens: 400
+TTFT: 1.794s
+Output TPS: 0.2
+Total TPS: 0.2
+
+Prompt 5/5: Complex analytical prompt
+Max tokens: 500
+TTFT: 1.184s
+Output TPS: 0.2
+Total TPS: 0.2
 
 ============================================================
 📊 SkipLLaMA Benchmark Results
 ============================================================
-📈 Performance Metrics (n=1 prompts):
+📈 Performance Metrics (n=5 prompts):
 ----------------------------------------
 ⚡ Time to First Token:
-   P50: 0.589s
-   P90: 0.589s
-   Mean: 0.589s
+   P50: 0.626s
+   P90: 0.900s
+   Mean: 0.716s
 🚀 Output Generation Speed:
-   P50: 1.1 tokens/sec
-   P90: 1.1 tokens/sec
-   Mean: 1.1 tokens/sec
+   P50: 0.4 tokens/sec
+   P90: 0.9 tokens/sec
+   Mean: 0.5 tokens/sec
 📊 Total Throughput:
-   P50: 1.3 tokens/sec
-   P90: 1.3 tokens/sec
-   Mean: 1.3 tokens/sec
-📈 SkipLLaMA Scripted MLP CPU Results:
-  Average time: 0.006s
-  Min time: 0.001s
-  Max time: 0.032s
+   P50: 0.4 tokens/sec
+   P90: 1.0 tokens/sec
+   Mean: 0.6 tokens/sec
 
 ============================================================
 📊 Standard LLaMA Benchmark Results
 ============================================================
-📈 Performance Metrics (n=1 prompts):
+📈 Performance Metrics (n=5 prompts):
 ----------------------------------------
 ⚡ Time to First Token:
-   P50: 1.920s
-   P90: 1.920s
-   Mean: 1.920s
+   P50: 1.279s
+   P90: 1.598s
+   Mean: 1.342s
 🚀 Output Generation Speed:
-   P50: 0.7 tokens/sec
-   P90: 0.7 tokens/sec
-   Mean: 0.7 tokens/sec
+   P50: 0.3 tokens/sec
+   P90: 0.5 tokens/sec
+   Mean: 0.3 tokens/sec
 📊 Total Throughput:
-   P50: 0.7 tokens/sec
-   P90: 0.7 tokens/sec
-   Mean: 0.7 tokens/sec
-📈 Standard LLaMA MLP CPU Results:
-  Average time: 0.030s
-  Min time: 0.020s
-  Max time: 0.212s
+   P50: 0.3 tokens/sec
+   P90: 0.6 tokens/sec
+   Mean: 0.4 tokens/sec
 
 ============================================================
 🏁 Performance Comparison
 ============================================================
-⚡ TTFT Speedup: 3.26x
-🚀 Output TPS Speedup: 1.73x
-📊 Total Throughput Speedup: 1.75x
+⚡ TTFT Speedup: 1.87x
+🚀 Output TPS Speedup: 1.59x
+📊 Total Throughput Speedup: 1.60x
