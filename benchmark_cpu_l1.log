@@ -1,0 +1,133 @@
+                                                                                                                                        
+Configuring for 8 CPU threads                                                                                                           
+                                                                                                                                        
+System Configuration:                                                                                                                   
+--------------------------------------------------                                                                                      
+OS: Linux 5.15.0-1089-azure                                                                                                             
+CPU: x86_64                                                                                                                             
+Physical cores: 8                                                                                                                       
+Total cores: 8                                                                                                                          
+Max CPU frequency: 0MHz                                                                                                                 
+Current CPU frequency: 2620MHz                                                                                                          
+RAM: Total=54.92GB, Available=50.03GB (8.9% used)                                                                                       
+                                                                                                                                        
+PyTorch version: 2.5.1                                                                                                                  
+CUDA version: 12.4                                                                                                                      
+--------------------------------------------------                                                                                      
+Using devices: cpu, cpu, cpu      
+                                                                                                                                        
+🎯 Running comprehensive benchmark with 5 diverse prompts...                                                                            
+📝 Test prompts: ['Short simple prompt', 'Medium recipe prompt', 'Long technical explanation', 'Creative writing prompt', 'Complex analy
+tical prompt']                                                                                                                          
+                                                                                                                                        
+=== Benchmarking SkipLLaMA ===                                                                                                          
+Model device: cpu                                                                                                                       
+Model dtype: torch.float32                                                                                                              
+Warming up model...                                                                                                                     
+                                                                                                                                        
+Running comprehensive benchmark on 5 prompts...                                                                                         
+                                                                                                                                        
+Prompt 1/5: Short simple prompt                                                                                                         
+Max tokens: 50                                                                                                                          
+TTFT: 0.348s                                                                                                                            
+Output TPS: 2.1                                                                                                                         
+Total TPS: 2.4                                                                                                                          
+                                                                                                                                        
+Prompt 2/5: Medium recipe prompt                                                                                                        
+Max tokens: 200                                                                                                                         
+TTFT: 0.378s                                                                                                                            
+Output TPS: 1.0                                                                                                                         
+Total TPS: 1.1                                                                                                                          
+                                                                                                                                        
+Prompt 3/5: Long technical explanation                                                                                                  
+Max tokens: 300                                                                                                                         
+TTFT: 0.444s                                                                                                                            
+Output TPS: 0.8                                                                                                                         
+Total TPS: 0.8                                                                                                                          
+                                                                                                                                        
+Prompt 4/5: Creative writing prompt                                                                                                     
+Max tokens: 400                                                                                                                         
+TTFT: 0.372s                                                                                                                            
+Output TPS: 0.7                                                                                                                         
+Total TPS: 0.7                                                                                                                          
+                                                                                                                                        
+Prompt 5/5: Complex analytical prompt                                                                                                   
+Max tokens: 500                                                                                                                         
+TTFT: 0.438s                                                                                                                            
+Output TPS: 0.5                                                                                                                         
+Total TPS: 0.6   
+
+Running comprehensive benchmark on 5 prompts...                                                                                         
+                                                                                                                                        
+Prompt 1/5: Short simple prompt                                                                                                         
+Max tokens: 50                                                                                                                          
+TTFT: 0.765s                                                                                                                            
+Output TPS: 1.3                                                                                                                         
+Total TPS: 1.4                                                                                                                          
+                                                                                                                                        
+Prompt 2/5: Medium recipe prompt                                                                                                        
+Max tokens: 200                                                                                                                         
+TTFT: 0.620s                                                                                                                            
+Output TPS: 0.8                                                                                                                         
+Total TPS: 0.8                                                                                                                          
+                                                                                                                                        
+Prompt 3/5: Long technical explanation                                                                                                  
+Max tokens: 300                                                                                                                         
+TTFT: 0.660s                                                                                                                            
+Output TPS: 0.6                                                                                                                         
+Total TPS: 0.6                                                                                                                          
+                                                                                                                                        
+Prompt 4/5: Creative writing prompt                                                                                                     
+Max tokens: 400                                                                                                                         
+TTFT: 0.768s                                                                                                                            
+Output TPS: 0.5                                                                                                                         
+Total TPS: 0.5                                                                                                                          
+                                                                                                                                        
+Prompt 5/5: Complex analytical prompt                                                                                                   
+Max tokens: 500                                                                                                                         
+TTFT: 0.902s                                                                                                                            
+Output TPS: 0.4                                                                                                                         
+Total TPS: 0.4    
+
+============================================================                                                                            
+📊 SkipLLaMA Benchmark Results                                      
+============================================================                                                                            
+📈 Performance Metrics (n=5 prompts):                               
+----------------------------------------                            
+⚡ Time to First Token:                                             
+   P50: 0.378s                                                      
+   P90: 0.442s                                                      
+   Mean: 0.396s                                                     
+🚀 Output Generation Speed:                                         
+   P50: 0.8 tokens/sec                                              
+   P90: 1.7 tokens/sec                                              
+   Mean: 1.0 tokens/sec                                             
+📊 Total Throughput:                                                
+   P50: 0.8 tokens/sec                                              
+   P90: 1.9 tokens/sec                                              
+   Mean: 1.1 tokens/sec                                             
+
+============================================================                                                                            
+📊 Standard LLaMA (HuggingFace) Benchmark Results                   
+============================================================                                                                            
+📈 Performance Metrics (n=5 prompts):                               
+----------------------------------------                            
+⚡ Time to First Token:                                             
+   P50: 0.765s                                                      
+   P90: 0.848s                                                      
+   Mean: 0.743s                                                     
+🚀 Output Generation Speed:                                         
+   P50: 0.6 tokens/sec                                              
+   P90: 1.1 tokens/sec                                              
+   Mean: 0.7 tokens/sec                                             
+📊 Total Throughput:                                                
+   P50: 0.6 tokens/sec                                              
+   P90: 1.2 tokens/sec                                              
+   Mean: 0.8 tokens/sec                                             
+
+============================================================                                                                            
+🏁 Performance Comparison                                           
+============================================================                                                                            
+⚡ TTFT Speedup: 1.88x                                              
+🚀 Output TPS Speedup: 1.43x                                        
+📊 Total Throughput Speedup: 1.44x 

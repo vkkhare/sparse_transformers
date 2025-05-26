@@ -1,3 +1,5 @@
+Configuration: configs/llama_skip_causal_3b.json
+
 Configuring for 8 CPU threads
 
 System Configuration:

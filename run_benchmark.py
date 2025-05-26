@@ -9,6 +9,9 @@ import threading
 import statistics
 from typing import List, Dict, Tuple, Optional, Union
 import numpy as np
+import subprocess
+import json
+import tempfile
 
 import torch
 from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
@@ -94,6 +97,12 @@ def parse_args() -> argparse.Namespace:
                       help='Verbose output')
     parser.add_argument('--config', type=str, default='configs/llama_skip_causal_3b.json',
                       help='Config file')
+    parser.add_argument('--compare_with_llamacpp', action='store_true',
+                      help='Compare with llama.cpp implementation instead of HuggingFace')
+    parser.add_argument('--llamacpp_model_path', type=str, default=None,
+                      help='Path to GGUF model file for llama.cpp')
+    parser.add_argument('--llamacpp_binary', type=str, default='llama.cpp/build/bin/llama-cli',
+                      help='Path to llama.cpp binary (default: llama.cpp/build/bin/llama-cli)')
     return parser.parse_args()
 
 
@@ -573,6 +582,257 @@ def print_comprehensive_results(results: Dict, model_name: str):
             print(f"   Max Utilization: {results['max_p90_gpu_utilization']:.1f}%")
 
 
+def check_llamacpp_available(binary_path: str) -> bool:
+    """Check if llama.cpp binary is available."""
+    try:
+        result = subprocess.run([binary_path, '--version'], 
+                              capture_output=True, text=True, timeout=5)
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def convert_model_to_gguf(model_path: str, output_path: str) -> bool:
+    """Convert HuggingFace model to GGUF format using llama.cpp convert script."""
+    try:
+        # Look for convert script in the local llama.cpp installation
+        convert_script = "llama.cpp/convert_hf_to_gguf.py"
+        if not os.path.exists(convert_script):
+            # Try without underscore (older versions)
+            convert_script = "llama.cpp/convert-hf-to-gguf.py"
+            if not os.path.exists(convert_script):
+                # Try the home directory as fallback
+                convert_script = os.path.expanduser("~/llama.cpp/convert_hf_to_gguf.py")
+                if not os.path.exists(convert_script):
+                    print(f"Convert script not found. Tried:")
+                    print(f"  - llama.cpp/convert_hf_to_gguf.py")
+                    print(f"  - llama.cpp/convert-hf-to-gguf.py")
+                    print(f"  - ~/llama.cpp/convert_hf_to_gguf.py")
+                    return False
+        
+        cmd = [
+            "python", convert_script,
+            model_path,
+            "--outfile", output_path,
+            "--outtype", "f16"  # Use FP16 for fair comparison
+        ]
+        
+        print(f"Converting model to GGUF format...")
+        print(f"Using script: {convert_script}")
+        print(f"Command: {' '.join(cmd)}")
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            print(f"Conversion failed: {result.stderr}")
+            return False
+            
+        print(f"✓ Model converted successfully to: {output_path}")
+        return True
+    except Exception as e:
+        print(f"Error converting model: {e}")
+        return False
+
+
+def benchmark_llamacpp_single_prompt(
+    model_path: str,
+    prompt: str,
+    max_tokens: int,
+    binary_path: str = "llama-cli",
+    temperature: float = 0.7,
+    device: str = "cpu"
+) -> Dict:
+    """Benchmark a single prompt using llama.cpp."""
+    
+    # Prepare command
+    cmd = [
+        binary_path,
+        "-m", model_path,
+        "-p", prompt,
+        "-n", str(max_tokens),
+        "--temp", str(temperature),
+        "--seed", "42",  # Fixed seed for reproducibility
+        "--log-disable",  # Disable logging for cleaner output
+        "--simple-io",  # Simple input/output mode
+        "-ngl", "99" if device == "cuda" else "0",  # GPU layers
+        "--no-display-prompt"  # Don't display the prompt in output
+    ]
+    
+    # Add timing flag if available in the llama.cpp version
+    cmd.extend(["--timings"])
+    
+    # Run llama.cpp
+    start_time = time.perf_counter()
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minute timeout
+        )
+        total_time = time.perf_counter() - start_time
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"llama.cpp failed: {result.stderr}")
+        
+        # Parse output and timing information
+        output_text = result.stdout
+        stderr_lines = result.stderr.strip().split('\n')
+        
+        # Extract timing metrics from stderr
+        metrics = {
+            'total_time_seconds': total_time,
+            'output_text': output_text
+        }
+        
+        # Parse timing information from llama.cpp output
+        for line in stderr_lines:
+            if "prompt eval time" in line:
+                # Extract prompt evaluation time
+                parts = line.split()
+                if "ms" in line:
+                    time_idx = parts.index("ms") - 1
+                    prompt_time_ms = float(parts[time_idx])
+                    metrics['prompt_eval_time_seconds'] = prompt_time_ms / 1000
+                    
+            elif "eval time" in line and "prompt eval" not in line:
+                # Extract generation time
+                parts = line.split()
+                if "ms" in line:
+                    time_idx = parts.index("ms") - 1
+                    gen_time_ms = float(parts[time_idx])
+                    metrics['generation_time_seconds'] = gen_time_ms / 1000
+                    
+            elif "total time" in line:
+                parts = line.split()
+                if "ms" in line:
+                    time_idx = parts.index("ms") - 1
+                    total_ms = float(parts[time_idx])
+                    metrics['reported_total_time_seconds'] = total_ms / 1000
+                    
+            elif "speed" in line or "tok/s" in line:
+                # Extract tokens per second
+                parts = line.split()
+                for i, part in enumerate(parts):
+                    if "tok/s" in part or (i > 0 and parts[i-1] == "tok/s"):
+                        try:
+                            tps = float(parts[i-2] if "tok/s" in part else part)
+                            if "prompt" in line:
+                                metrics['prompt_tokens_per_second'] = tps
+                            else:
+                                metrics['output_tokens_per_second'] = tps
+                        except (ValueError, IndexError):
+                            pass
+        
+        # Count tokens (approximate)
+        output_tokens = len(output_text.split())  # Rough approximation
+        input_tokens = len(prompt.split())  # Rough approximation
+        
+        metrics.update({
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'total_tokens': input_tokens + output_tokens
+        })
+        
+        # Calculate TTFT if we have the metrics
+        if 'prompt_eval_time_seconds' in metrics:
+            metrics['time_to_first_token_seconds'] = metrics['prompt_eval_time_seconds']
+        
+        # Calculate tokens per second if not provided
+        if 'output_tokens_per_second' not in metrics and 'generation_time_seconds' in metrics:
+            if metrics['generation_time_seconds'] > 0:
+                metrics['output_tokens_per_second'] = output_tokens / metrics['generation_time_seconds']
+        
+        if 'tokens_per_second' not in metrics:
+            metrics['tokens_per_second'] = metrics['total_tokens'] / total_time
+        
+        return metrics
+        
+    except subprocess.TimeoutExpired:
+        return {
+            'error': 'Timeout',
+            'total_time_seconds': 300,
+            'input_tokens': len(prompt.split()),
+            'output_tokens': 0,
+            'total_tokens': len(prompt.split())
+        }
+    except Exception as e:
+        return {
+            'error': str(e),
+            'total_time_seconds': time.perf_counter() - start_time,
+            'input_tokens': len(prompt.split()),
+            'output_tokens': 0,
+            'total_tokens': len(prompt.split())
+        }
+
+
+def benchmark_llamacpp_model(
+    model_path: str,
+    test_prompts: List[Dict],
+    binary_path: str = "llama-cli",
+    device: str = "cpu",
+    temperature: float = 0.7
+) -> Dict:
+    """Benchmark llama.cpp model across multiple prompts."""
+    
+    all_results = []
+    
+    print(f"\nRunning llama.cpp benchmark on {len(test_prompts)} prompts...")
+    print(f"Model: {model_path}")
+    print(f"Device: {device}")
+    
+    for i, prompt_config in enumerate(test_prompts):
+        print(f"\nPrompt {i+1}/{len(test_prompts)}: {prompt_config['description']}")
+        print(f"Max tokens: {prompt_config['max_tokens']}")
+        
+        try:
+            result = benchmark_llamacpp_single_prompt(
+                model_path=model_path,
+                prompt=prompt_config['prompt'],
+                max_tokens=prompt_config['max_tokens'],
+                binary_path=binary_path,
+                temperature=temperature,
+                device=device
+            )
+            
+            if 'error' not in result:
+                result['prompt_description'] = prompt_config['description']
+                all_results.append(result)
+                
+                # Print individual results
+                if 'time_to_first_token_seconds' in result:
+                    print(f"TTFT: {result['time_to_first_token_seconds']:.3f}s")
+                if 'output_tokens_per_second' in result:
+                    print(f"Output TPS: {result['output_tokens_per_second']:.1f}")
+                print(f"Total time: {result['total_time_seconds']:.3f}s")
+            else:
+                print(f"Error: {result['error']}")
+                
+        except Exception as e:
+            print(f"Error benchmarking prompt {i+1}: {str(e)}")
+            continue
+    
+    if not all_results:
+        return {}
+    
+    # Aggregate results
+    metrics = ['time_to_first_token_seconds', 'tokens_per_second', 'output_tokens_per_second', 'total_time_seconds']
+    
+    aggregated = {}
+    
+    for metric in metrics:
+        values = [r[metric] for r in all_results if metric in r and r[metric] > 0]
+        if values:
+            aggregated[f'p50_{metric}'] = statistics.median(values)
+            aggregated[f'p90_{metric}'] = np.percentile(values, 90)
+            aggregated[f'mean_{metric}'] = statistics.mean(values)
+    
+    aggregated['total_prompts'] = len(all_results)
+    aggregated['individual_results'] = all_results
+    
+    return aggregated
+
+
 def main():
     """Main function to run the comprehensive benchmark."""
     args = parse_args()
@@ -597,17 +857,14 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # Load models
-    skip_model = LlamaSkipConnectionForCausalLM.from_pretrained(checkpoint, config=config)
-    standard_model = AutoModelForCausalLM.from_pretrained(checkpoint)
-
     # Get test prompts
     test_prompts = get_diverse_test_prompts()
     
     print(f"\n🎯 Running comprehensive benchmark with {len(test_prompts)} diverse prompts...")
     print(f"📝 Test prompts: {[p['description'] for p in test_prompts]}")
 
-    # Run benchmarks
+    # Always run SkipLLaMA benchmark with HuggingFace
+    skip_model = LlamaSkipConnectionForCausalLM.from_pretrained(checkpoint, config=config)
     skip_results = run_inference(
         model=skip_model,
         tokenizer=tokenizer,
@@ -617,18 +874,52 @@ def main():
         verbose=args.verbose
     )
 
-    standard_results = run_inference(
-        model=standard_model,
-        tokenizer=tokenizer,
-        test_prompts=test_prompts,
-        model_device=standard_device,
-        model_name="Standard LLaMA",
-        verbose=args.verbose
-    )
+    # Run standard model benchmark
+    if args.compare_with_llamacpp:
+        # Check if llama.cpp is available
+        if not check_llamacpp_available(args.llamacpp_binary):
+            print(f"\n❌ llama.cpp binary '{args.llamacpp_binary}' not found!")
+            print("Please install llama.cpp and ensure the binary is in your PATH")
+            print("Or specify the full path using --llamacpp_binary")
+            return
+        
+        # Determine GGUF model path
+        if args.llamacpp_model_path:
+            gguf_model_path = args.llamacpp_model_path
+        else:
+            # Try to convert the model
+            gguf_model_path = os.path.join(tempfile.gettempdir(), "model.gguf")
+            print(f"\n📦 Converting model to GGUF format...")
+            if not convert_model_to_gguf(checkpoint, gguf_model_path):
+                print("❌ Failed to convert model to GGUF format")
+                print("Please provide a pre-converted GGUF model using --llamacpp_model_path")
+                return
+        
+        # Run llama.cpp benchmark
+        standard_results = benchmark_llamacpp_model(
+            model_path=gguf_model_path,
+            test_prompts=test_prompts,
+            binary_path=args.llamacpp_binary,
+            device=args.device,
+            temperature=0.7
+        )
+        standard_name = "Standard LLaMA (llama.cpp)"
+    else:
+        # Use HuggingFace implementation
+        standard_model = AutoModelForCausalLM.from_pretrained(checkpoint)
+        standard_results = run_inference(
+            model=standard_model,
+            tokenizer=tokenizer,
+            test_prompts=test_prompts,
+            model_device=standard_device,
+            model_name="Standard LLaMA (HuggingFace)",
+            verbose=args.verbose
+        )
+        standard_name = "Standard LLaMA (HuggingFace)"
 
     # Print results
     print_comprehensive_results(skip_results, "SkipLLaMA")
-    print_comprehensive_results(standard_results, "Standard LLaMA")
+    print_comprehensive_results(standard_results, standard_name)
     
     # Calculate speedups
     if skip_results and standard_results:
