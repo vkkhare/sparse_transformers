@@ -3,6 +3,7 @@
 *.py[cod]
 *$py.class
 *.so
+llama.cpp/
 .Python
 build/
 develop-eggs/
@@ -19,7 +20,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+.cursorrules
+wandb/
 # CUDA
 *.i
 *.ii
@@ -29,7 +31,8 @@ wheels/
 *.fatbin
 *.o
 *.obj
-
+*.pkl
+*.png
 # IDE specific files
 .idea/
 .vscode/
