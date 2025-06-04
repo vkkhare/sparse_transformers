@@ -638,7 +638,10 @@ class LlamaSkipConnectionForCausalLM(LlamaSkipPreTrainedModel, GenerationMixin):
         "model.layers.*.mlp_lora_proj.intermediate",
         "model.layers.*.mlp_lora_proj.output", 
         "model.layers.*.mlp_lora_proj.up.weight",
-        "model.layers.*.mlp_mask"
+        "model.layers.*.mlp_mask",
+        "model.layers.*.standard_mlp.gate_proj.weight",
+        "model.layers.*.standard_mlp.up_proj.weight",
+        "model.layers.*.standard_mlp.down_proj.weight"
     ]
 
     def __init__(self, config):
@@ -661,9 +664,6 @@ class LlamaSkipConnectionForCausalLM(LlamaSkipPreTrainedModel, GenerationMixin):
 
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
-
-    def set_decoder(self, decoder):
-        self.model = decoder
 
     def get_decoder(self):
         return self.model

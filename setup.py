@@ -228,7 +228,7 @@ def read_requirements():
 setup(
     name='sparse_transformers',
     version='0.0.1',
-    description='Sparse Transformer implementation with skip connections',
+    description='Sparse Inferencing for transformer based LLMs',
     packages=find_packages(),
     ext_modules=ext_modules,
     cmdclass={
