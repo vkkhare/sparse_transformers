@@ -3,7 +3,7 @@
 ## Overview
 
 The project implements sparse multiplication and fuses up/down projections in the MLP layers through low rank weight activations. 
-Work is based on [Deja Vu](https://arxiv.org/abs/2310.17157) and Apple's [LLM in a Flash](https://arxiv.org/abs/2401.02486).
+Work is based on [Deja Vu](https://arxiv.org/abs/2310.17157) and Apple's [LLM in a Flash](https://arxiv.org/abs/2312.11514).
 
 ### Benefits
 - **1.6-1.8x overall gain in TTFT and TPS** (4-5x gain in MLP Inference)
