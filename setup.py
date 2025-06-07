@@ -144,6 +144,7 @@ base_include_dirs = [
 
 # Define extensions
 ext_modules = []
+<<<<<<< HEAD
 
 cpp_source = 'sparse_transformers/csrc/sparse_mlp_op.cpp'
 cuda_source = 'sparse_transformers/csrc/sparse_mlp_cuda.cu'
@@ -173,11 +174,35 @@ if torch.cuda.is_available() and os.path.exists(cuda_source):
     else:
         print("CUDA include directories not found, falling back to CPU-only extension...")
         raise RuntimeError("CUDA headers not found")
+=======
+if torch.cuda.is_available():
+    extension = CUDAExtension(
+        name='sparse_transformers',
+        sources=[
+            'sparse_transformers/csrc/sparse_mlp_op.cpp',
+            'sparse_transformers/csrc/sparse_mlp_cuda.cu'
+        ],
+        include_dirs=base_include_dirs,
+        extra_compile_args={
+            'cxx': cpu_compile_args,
+            'nvcc': cuda_compile_args
+        },
+        extra_link_args=extra_link_args,
+        libraries=['gomp', 'cudart'],
+        library_dirs=[str(build_dir / 'lib')],
+        define_macros=[('WITH_CUDA', None)]
+    )
+>>>>>>> upstream/main
 else:
     print("Building CPU-only extension...")
     extension = CppExtension(
+<<<<<<< HEAD
         name='sparse_transformers.sparse_transformers',
         sources=[cpp_source],
+=======
+        name='sparse_transformers',
+        sources=['sparse_transformers/csrc/sparse_mlp_op.cpp'],
+>>>>>>> upstream/main
         extra_compile_args=cpu_compile_args,
         extra_link_args=extra_link_args,
         library_dirs=[str(build_dir / 'lib')],
@@ -227,12 +252,15 @@ def read_requirements():
 
 setup(
     name='sparse_transformers',
+<<<<<<< HEAD
     version='0.0.1',
 <<<<<<< HEAD
     description='Sparse Inferencing for transformer based LLMs',
 =======
     description='Sparse Transformer implementation with skip connections',
 >>>>>>> 0313154 (cleaning merge conflicts)
+=======
+>>>>>>> upstream/main
     packages=find_packages(),
     ext_modules=ext_modules,
     cmdclass={
