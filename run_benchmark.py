@@ -1,88 +1,17 @@
 # %%
 import argparse
 import gc
-import platform
-import psutil
 import time
-import os
-import threading
 import statistics
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Union
 import numpy as np
-from accelerate import init_empty_weights, infer_auto_device_map
 
 import torch
-from transformers import pipeline, AutoModelForCausalLM, AutoConfig, AutoTokenizer
-from transformers.models.llama.modeling_llama import LlamaMLP
-from src.models.llama.modelling_llama_skip import LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection
+from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
+from src.models.llama.modelling_llama_skip import LlamaSkipConnectionForCausalLM
 from src.models.llama.configuration_llama_skip import LlamaSkipConnectionConfig
-
-
-class GPUMonitor:
-    """Monitor GPU usage during inference."""
-    
-    def __init__(self, monitoring_interval: float = 0.1):
-        self.monitoring_interval = monitoring_interval
-        self._gpu_memory_usage = []
-        self._gpu_utilization = []
-        self._is_monitoring = False
-        self._monitor_thread = None
-        
-    def _monitor_gpu(self):
-        """Background monitoring of GPU metrics."""
-        try:
-            import pynvml
-            pynvml.nvmlInit()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            
-            while self._is_monitoring:
-                # Get memory info
-                memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                memory_used_mb = memory_info.used / 1024**2
-                
-                # Get utilization
-                utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                gpu_util = utilization.gpu
-                
-                self._gpu_memory_usage.append(memory_used_mb)
-                self._gpu_utilization.append(gpu_util)
-                
-                time.sleep(self.monitoring_interval)
-                
-        except ImportError:
-            # Fallback to torch methods if pynvml not available
-            while self._is_monitoring:
-                if torch.cuda.is_available():
-                    memory_used_mb = torch.cuda.memory_allocated() / 1024**2
-                    self._gpu_memory_usage.append(memory_used_mb)
-                time.sleep(self.monitoring_interval)
-    
-    def start(self):
-        """Start GPU monitoring."""
-        self._is_monitoring = True
-        self._gpu_memory_usage.clear()
-        self._gpu_utilization.clear()
-        self._monitor_thread = threading.Thread(target=self._monitor_gpu)
-        self._monitor_thread.start()
-    
-    def stop(self):
-        """Stop GPU monitoring."""
-        self._is_monitoring = False
-        if self._monitor_thread:
-            self._monitor_thread.join()
-    
-    def get_peak_usage(self) -> Dict:
-        """Get peak GPU usage metrics."""
-        if not self._gpu_memory_usage:
-            return {"peak_gpu_memory_mb": 0, "p90_gpu_utilization": 0}
-        
-        return {
-            "peak_gpu_memory_mb": max(self._gpu_memory_usage),
-            "p90_gpu_memory_mb": np.percentile(self._gpu_memory_usage, 90),
-            "max_gpu_utilization": max(self._gpu_utilization) if self._gpu_utilization else 0,
-            "p90_gpu_utilization": np.percentile(self._gpu_utilization, 90) if self._gpu_utilization else 0
-        }
-
+from src.utilities.cuda_utils import GPUMonitor, setup_cuda_debugging
+from src.utilities.sys_utils import print_system_info
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
@@ -91,104 +20,11 @@ def parse_args() -> argparse.Namespace:
                       help='Device to run inference on')
     parser.add_argument('--num_runs', type=int, default=50,
                       help='Number of inference runs')
-    parser.add_argument('--verbose', type=bool, default=False,
+    parser.add_argument('--verbose', action='store_true', default=False,
                       help='Verbose output')
     parser.add_argument('--config', type=str, default='configs/llama_skip_causal_3b.json',
                       help='Config file')
-    parser.add_argument('--compare_with_llamacpp', action='store_true',
-                      help='Compare with llama.cpp implementation instead of HuggingFace')
-    parser.add_argument('--llamacpp_model_path', type=str, default=None,
-                      help='Path to GGUF model file for llama.cpp')
-    parser.add_argument('--llamacpp_binary', type=str, default='llama.cpp/build/bin/llama-cli',
-                      help='Path to llama.cpp binary (default: llama.cpp/build/bin/llama-cli)')
     return parser.parse_args()
-
-
-def get_gpu_info() -> Optional[List[Dict]]:
-    """Get GPU information if CUDA is available."""
-    if not torch.cuda.is_available():
-        return None
-    
-    gpu_info = []
-    for i in range(torch.cuda.device_count()):
-        props = torch.cuda.get_device_properties(i)
-        mem_info = torch.cuda.mem_get_info(i)
-        free_memory = mem_info[0] / 1024**3  # Convert to GB
-        total_memory = mem_info[1] / 1024**3  # Convert to GB
-        gpu_info.append({
-            'name': props.name,
-            'compute_capability': f"{props.major}.{props.minor}",
-            'total_memory': f"{total_memory:.2f}GB",
-            'free_memory': f"{free_memory:.2f}GB",
-            'multi_processor_count': props.multi_processor_count
-        })
-    return gpu_info
-
-
-def get_system_info() -> Dict:
-    """Get system information including CPU and RAM details."""
-    cpu_info = {
-        'processor': platform.processor(),
-        'physical_cores': psutil.cpu_count(logical=False),
-        'total_cores': psutil.cpu_count(logical=True),
-        'max_frequency': f"{psutil.cpu_freq().max:.0f}MHz" if psutil.cpu_freq() else "Unknown",
-        'current_frequency': f"{psutil.cpu_freq().current:.0f}MHz" if psutil.cpu_freq() else "Unknown"
-    }
-    
-    memory = psutil.virtual_memory()
-    ram_info = {
-        'total': f"{memory.total / (1024**3):.2f}GB",
-        'available': f"{memory.available / (1024**3):.2f}GB",
-        'used_percent': f"{memory.percent}%"
-    }
-    
-    return {
-        'system': platform.system(),
-        'release': platform.release(),
-        'version': platform.version(),
-        'machine': platform.machine(),
-        'cpu': cpu_info,
-        'ram': ram_info
-    }
-
-
-def print_system_info(args: argparse.Namespace) -> None:
-    """Print system configuration information."""
-    print("\nSystem Configuration:")
-    print("-" * 50)
-    system_info = get_system_info()
-    print(f"OS: {system_info['system']} {system_info['release']}")
-    print(f"CPU: {system_info['cpu']['processor']}")
-    print(f"Physical cores: {system_info['cpu']['physical_cores']}")
-    print(f"Total cores: {system_info['cpu']['total_cores']}")
-    print(f"Max CPU frequency: {system_info['cpu']['max_frequency']}")
-    print(f"Current CPU frequency: {system_info['cpu']['current_frequency']}")
-    print(f"RAM: Total={system_info['ram']['total']}, Available={system_info['ram']['available']} ({system_info['ram']['used_percent']} used)")
-
-    if args.device == 'cuda':
-        print("\nGPU Configuration:")
-        print("-" * 50)
-        gpu_info = get_gpu_info()
-        for i, gpu in enumerate(gpu_info or []):
-            print(f"\nGPU {i}: {gpu['name']}")
-            print(f"Compute capability: {gpu['compute_capability']}")
-            print(f"Total memory: {gpu['total_memory']}")
-            print(f"Free memory: {gpu['free_memory']}")
-            print(f"Multi processors: {gpu['multi_processor_count']}")
-
-    print("\nPyTorch version:", torch.__version__)
-    print("CUDA version:", torch.version.cuda if torch.cuda.is_available() else "N/A")
-    print("-" * 50)
-
-
-def setup_torch_optimizations() -> None:
-    """Enable TorchScript optimizations."""
-    torch.jit.enable_onednn_fusion(True)
-    torch._C._jit_override_can_fuse_on_cpu(True)
-    torch._C._jit_override_can_fuse_on_gpu(True)
-    torch._C._jit_set_texpr_fuser_enabled(True)
-    torch._C._jit_set_profiling_executor(True)
-    torch._C._jit_set_profiling_mode(True)
 
 
 def setup_devices(args: argparse.Namespace) -> Tuple[torch.device, torch.device, torch.device]:
@@ -202,41 +38,17 @@ def setup_devices(args: argparse.Namespace) -> Tuple[torch.device, torch.device,
     if args.device == 'cuda':
         num_gpus = torch.cuda.device_count()
         print(f"Number of available GPUs: {num_gpus}")
+        
         if num_gpus > 1:
             standard_device = torch.device('cuda:1')
             skip_device = torch.device('cuda:0')
         else:
             standard_device = skip_device = device
     else:
+        device = torch.device('cpu')
         standard_device = skip_device = device
     
     return device, standard_device, skip_device
-
-
-def create_pipeline(model, tokenizer: AutoTokenizer, device: torch.device, **kwargs):
-    """Create a text generation pipeline."""
-    return pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=tokenizer,
-        device=device,
-        max_new_tokens=1000,
-        eos_token_id=tokenizer.eos_token_id,
-        **kwargs
-    )
-
-
-def setup_cuda_debugging(verbose: bool = False):
-    """Setup CUDA debugging flags."""
-    # Enable CUDA launch blocking for synchronous error reporting
-    torch.cuda.set_device(0)  # Set primary device
-    
-    if verbose:
-        os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-        # Enable CUDA memory stats
-        torch.cuda.memory.set_per_process_memory_fraction(0.9)  # Leave some GPU memory free
-        torch.cuda.memory._record_memory_history(max_entries=10000)
-
 
 def get_diverse_test_prompts() -> List[Dict[str, Union[str, int]]]:
     """Get diverse test prompts for comprehensive benchmarking."""
@@ -246,26 +58,26 @@ def get_diverse_test_prompts() -> List[Dict[str, Union[str, int]]]:
             "max_tokens": 50,
             "description": "Short simple prompt"
         },
-        # {
-        #     "prompt": "Give me a detailed recipe for making a burrito including all ingredients and their quantities.",
-        #     "max_tokens": 200,
-        #     "description": "Medium recipe prompt"
-        # },
-        # {
-        #     "prompt": "Explain the concept of machine learning, its applications in modern technology, and how it differs from traditional programming approaches. Include examples.",
-        #     "max_tokens": 300,
-        #     "description": "Long technical explanation"
-        # },
-        # {
-        #     "prompt": "Write a short story about a robot discovering emotions.",
-        #     "max_tokens": 400,
-        #     "description": "Creative writing prompt"
-        # },
-        # {
-        #     "prompt": "Analyze the economic implications of artificial intelligence on job markets, considering both positive and negative effects, and suggest potential policy responses.",
-        #     "max_tokens": 500,
-        #     "description": "Complex analytical prompt"
-        # }
+        {
+            "prompt": "Give me a detailed recipe for making a burrito including all ingredients and their quantities.",
+            "max_tokens": 200,
+            "description": "Medium recipe prompt"
+        },
+        {
+            "prompt": "Explain the concept of machine learning, its applications in modern technology, and how it differs from traditional programming approaches. Include examples.",
+            "max_tokens": 300,
+            "description": "Long technical explanation"
+        },
+        {
+            "prompt": "Write a short story about a robot discovering emotions.",
+            "max_tokens": 400,
+            "description": "Creative writing prompt"
+        },
+        {
+            "prompt": "Analyze the economic implications of artificial intelligence on job markets, considering both positive and negative effects, and suggest potential policy responses.",
+            "max_tokens": 500,
+            "description": "Complex analytical prompt"
+        }
     ]
 
 
@@ -279,20 +91,17 @@ def reset_model_state(model: AutoModelForCausalLM, model_device: torch.device = 
     gc.collect()
 
     # Check if model has any meta tensors
-    # has_meta_tensors = any(
-    #     (hasattr(p, 'is_meta') and p.is_meta) or 
-    #     (hasattr(p, 'device') and p.device.type == 'meta')
-    #     for p in model.parameters()
-    # )
+    has_meta_tensors = any(
+        (hasattr(p, 'is_meta') and p.is_meta) or 
+        (hasattr(p, 'device') and p.device.type == 'meta')
+        for p in model.parameters()
+    )
     
-    # if has_meta_tensors:
-    #     # Use to_empty() for models with meta tensors
-    #     print("Detected meta tensors, using to_empty() for device transfer...")
-    #     model = model.to_empty(device=model_device)
-    #     model.tie_weights()
-    # else:
-    #     # Use standard to() for normal models
-    #     model = model.to(model_device)
+    if has_meta_tensors and model_device.type == 'cuda':
+        # Use to_empty() for models with meta tensors
+        print("Detected meta tensors, using to_empty() for device transfer...")
+        model = model.to_empty(device=model_device)
+        model.tie_weights()
 
     # Clear past key values cache
     if hasattr(model, 'past_key_values'):
@@ -588,11 +397,11 @@ def main():
     if args.device == 'cuda':
         setup_cuda_debugging(verbose=args.verbose)
     
-    setup_torch_optimizations()
-    print_system_info(args)
-    
     device, standard_device, skip_device = setup_devices(args)
     print(f"Using devices: {device}, {standard_device}, {skip_device}")
+    
+    # Print system info after device setup
+    print_system_info(args)
 
     # Register custom models
     AutoConfig.register("llama-skip", LlamaSkipConnectionConfig)

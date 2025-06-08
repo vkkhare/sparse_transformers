@@ -5,17 +5,6 @@ Training script for sparsity predictors in LlamaSkipConnection models.
 This script trains the LoRA-based sparsity predictors to predict which neurons
 will be most important based on ground truth activations from standard LLaMA.
 
-The script uses the C4 (Colossal Clean Crawled Corpus) dataset by default, which
-is the same dataset used to train LLaMA models. C4 provides high-quality English
-text data that matches the training distribution of the original LLaMA models,
-making it ideal for training sparsity predictors.
-
-C4 Dataset:
-- 750GB of English-language text from Common Crawl
-- Cleaned and filtered web content 
-- Used to train Google's T5/LaMDA and Meta's LLaMA models
-- Available via HuggingFace datasets as 'allenai/c4'
-
 Usage:
     python train_predictors.py \
         --config configs/llama_skip_causal_3b_predictor_training.json \

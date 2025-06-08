@@ -83,11 +83,6 @@ class FastLoRAProjection(nn.Module):
             self.output.fill_(0.0)  # Explicitly initialize with zeros
    
     def forward(self, x):
-        # Check input for NaN/Inf  
-        if torch.isnan(x).any():
-            print(f"WARNING: NaN detected in LoRA input X! Input shape: {x.shape}")
-            print(f"Input stats: mean={x.mean():.6f}, std={x.std():.6f}, min={x.min():.6f}, max={x.max():.6f}")
-
         batch_size = x.size(0)
         
         # Check if gradients are required (training mode)
@@ -97,15 +92,14 @@ class FastLoRAProjection(nn.Module):
             output = torch.mm(intermediate, self.up.weight.t())
             return output
         else:
-            # Use optimized in-place operations for inference
-            intermediate = torch.mm(x, self.down.weight.t())
-            output = torch.mm(intermediate, self.up.weight.t())
-            return output
+            # # Use optimized in-place operations for inference
+            # intermediate = torch.mm(x, self.down.weight.t())
+            # output = torch.mm(intermediate, self.up.weight.t())
+            # return output
         
             self._resize_buffers(batch_size, x.dtype)
             torch.mm(x, self.down.weight.t(), out=self.intermediate)
             torch.mm(self.intermediate, self.up.weight.t(), out=self.output)
-            print("test", self.output.shape, self.output.mean(), self.output.std())
             return self.output
                      
 class LlamaSkipMLP(nn.Module):
