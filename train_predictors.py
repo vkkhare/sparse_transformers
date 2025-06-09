@@ -255,11 +255,9 @@ def train_predictors(
         
         for batch in progress_bar:
             input_ids = batch['input_ids'].to(device)
-            print("input_ids", input_ids.detach().cpu().numpy())
             # Forward pass
             outputs = model(input_ids=input_ids)
             loss = outputs.loss
-            print("loss", loss.item())
             # Backward pass
             optimizer.zero_grad()
             loss.backward()
