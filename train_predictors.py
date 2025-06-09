@@ -44,78 +44,26 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class TextDataset(Dataset):
-    """Dataset for training sparsity predictors."""
-    
-    def __init__(self, texts: List[str], tokenizer, max_length: int = 512):
-        self.texts = texts
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-    
-    def __len__(self):
-        return len(self.texts)
-    
-    def __getitem__(self, idx):
-        text = self.texts[idx]
-        encoding = self.tokenizer(
-            text,
-            truncation=True,
-            padding='max_length',
-            max_length=self.max_length,
-            return_tensors='pt'
-        )
-        return {
-            'input_ids': encoding['input_ids'].squeeze(),
-            'attention_mask': encoding['attention_mask'].squeeze()
-        }
-
-
-def load_training_data(dataset_name: str = "allenai/c4", 
+def load_training_data(tokenizer: AutoTokenizer,
+                       dataset_name: str = "allenai/c4", 
                       dataset_config: str = "realnewslike",
-                      num_samples: int = 10000,
-                      max_length: int = 512) -> Tuple[List[str], List[str]]:
+                      max_length: int = 2000
+                      ) -> Tuple[List[str], List[str]]:
     """Load and prepare training data."""
     logger.info(f"Loading dataset: {dataset_name}/{dataset_config}")
     
+    def tokenize_function(examples):
+        return tokenizer(examples["text"], padding="max_length", truncation=True, max_length=max_length)
+
     if dataset_name == "allenai/c4":
-        # Load C4 dataset with streaming for efficiency
-        dataset = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
-        
-        # Extract text samples from streaming dataset
-        train_texts = []
-        val_texts = []
-        
-        logger.info("Extracting samples from C4 dataset...")
-        for i, sample in enumerate(dataset):
-            if i >= num_samples + 1000:  # Extra samples for validation
-                break
-            
-            text = sample['text']
-            if len(text.strip()) > 50:  # Filter out very short texts
-                if i < num_samples:
-                    train_texts.append(text)
-                else:
-                    val_texts.append(text)
-        
-        # Ensure we have validation samples
-        if not val_texts:
-            val_texts = train_texts[-1000:]  # Use last 1000 as validation
-            train_texts = train_texts[:-1000]
-            
+        train_dataset = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
+        train_dataset = train_dataset.with_format("torch")
+        val_dataset = train_dataset.take(1000)
+        train_dataset = train_dataset.skip(1000)
     else:
-        # Original logic for other datasets like WikiText
-        dataset = load_dataset(dataset_name, dataset_config)
-        
-        # Filter out empty texts and combine train/validation
-        train_texts = [text for text in dataset['train']['text'] if text.strip()]
-        val_texts = [text for text in dataset['validation']['text'] if text.strip()]
-        
-        # Limit number of samples
-        train_texts = train_texts[:num_samples]
-        val_texts = val_texts[:min(1000, len(val_texts))]
+        raise ValueError(f"Dataset {dataset_name} not supported")
     
-    logger.info(f"Loaded {len(train_texts)} training samples, {len(val_texts)} validation samples")
-    return train_texts, val_texts
+    return train_dataset.map(tokenize_function, batched=True) , val_dataset.map(tokenize_function, batched=True) 
 
 
 def evaluate_predictor_accuracy(model: LlamaSkipConnectionForCausalLM,
@@ -137,10 +85,9 @@ def evaluate_predictor_accuracy(model: LlamaSkipConnectionForCausalLM,
                 break
                 
             input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
             
             # Forward pass to collect predictor scores and ground truth
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            outputs = model(input_ids=input_ids)
             
             # Calculate metrics for each layer
             layer_accuracies = []
@@ -161,7 +108,6 @@ def evaluate_predictor_accuracy(model: LlamaSkipConnectionForCausalLM,
                         gt_activations = layer.get_ground_truth_activations(hidden_reshaped)
                         
                         # Create binary masks
-                        k = int(layer.sparsity * pred_scores.shape[-1])
                         _, gt_indices = torch.topk(torch.abs(gt_activations), k, dim=-1)
                         _, pred_indices = torch.topk(pred_scores, k, dim=-1)
                         
@@ -210,11 +156,12 @@ def evaluate_predictor_accuracy(model: LlamaSkipConnectionForCausalLM,
 
 def train_predictors(
     model: LlamaSkipConnectionForCausalLM,
-    train_dataloader: DataLoader,
-    val_dataloader: DataLoader,
+    train_dataset: Dataset,
+    val_dataset: Dataset,
     num_epochs: int,
     learning_rate: float,
     device: torch.device,
+    batch_size: int,
     save_dir: str,
     eval_steps: int = 500,
     save_steps: int = 1000,
@@ -229,12 +176,24 @@ def train_predictors(
     # Setup optimizer
     predictor_params = model.get_predictor_parameters()
     optimizer = torch.optim.AdamW(predictor_params, lr=learning_rate, weight_decay=0.01)
-    
+    num_steps = 1380000//batch_size
+    train_dataloader = DataLoader(
+        train_dataset,
+          batch_size=batch_size, 
+          num_workers=16, 
+          pin_memory=True,
+          prefetch_factor=4)
+    val_dataloader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        num_workers=4, 
+        pin_memory=True,
+        prefetch_factor=2)
     # Setup scheduler
-    total_steps = len(train_dataloader) * num_epochs
+    total_steps =  num_steps * num_epochs
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=int(0.1 * total_steps),
+        num_warmup_steps=int(0.01 * total_steps),
         num_training_steps=total_steps
     )
     
@@ -250,13 +209,15 @@ def train_predictors(
         epoch_loss = 0.0
         epoch_predictor_loss = 0.0
         num_batches = 0
+        train_dataset.set_epoch(epoch)
+        val_dataset.set_epoch(epoch)
+        progress_bar = tqdm(total=num_steps, desc=f"Epoch {epoch+1}/{num_epochs}")
         
-        progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
-        
-        for batch in progress_bar:
+        for batch in train_dataloader:
             input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
             # Forward pass
-            outputs = model(input_ids=input_ids)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
             loss = outputs.loss
             # Backward pass
             optimizer.zero_grad()
@@ -309,19 +270,20 @@ def train_predictors(
                     model.train()  # Ensure we're back in training mode
             
             # Save checkpoint
-            if global_step % save_steps == 0:
-                checkpoint_path = os.path.join(save_dir, f"checkpoint-{global_step}")
-                model.save_pretrained(checkpoint_path)
-                logger.info(f"Saved checkpoint at step {global_step}")
+            # if global_step % save_steps == 0:
+            #     checkpoint_path = os.path.join(save_dir, f"checkpoint-{global_step}")
+            #     model.save_pretrained(checkpoint_path)
+            #     logger.info(f"Saved checkpoint at step {global_step}")
             
             # Log training metrics
-            if use_wandb and global_step % 100 == 0:
+            if use_wandb and global_step % 50 == 0:
                 wandb.log({
                     "train/loss": loss.item(),
                     "train/learning_rate": scheduler.get_last_lr()[0],
-                    "step": global_step
-                })
-        
+                    "step": global_step,
+                } | {f"gradients/layer_{i}": p.grad.mean().item() for i, p in enumerate(predictor_params)})
+            progress_bar.update(1)
+
         # End of epoch logging
         avg_loss = epoch_loss / num_batches
         logger.info(f"Epoch {epoch+1} completed. Average loss: {avg_loss:.4f}")
@@ -345,14 +307,14 @@ def main():
     parser.add_argument("--dataset", type=str, default="allenai/c4", help="Dataset name (default: allenai/c4)")
     parser.add_argument("--dataset_config", type=str, default="realnewslike", 
                        help="Dataset configuration (default: realnewslike for C4)")
-    parser.add_argument("--num_samples", type=int, default=10000, 
-                       help="Number of training samples (default: 10000)")
-    parser.add_argument("--max_length", type=int, default=512, help="Maximum sequence length")
-    parser.add_argument("--batch_size", type=int, default=4, help="Training batch size")
+    parser.add_argument("--num_samples", type=int, default=13800000, 
+                       help="Number of training samples (default: 13800000)")
+    parser.add_argument("--max_length", type=int, default=256, help="Maximum sequence length")
+    parser.add_argument("--batch_size", type=int, default=24, help="Training batch size")
     parser.add_argument("--num_epochs", type=int, default=3, help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--eval_steps", type=int, default=500, help="Evaluation frequency")
-    parser.add_argument("--save_steps", type=int, default=1000, help="Save frequency")
+    parser.add_argument("--eval_steps", type=int, default=50000, help="Evaluation frequency")
+    parser.add_argument("--save_steps", type=int, default=50000, help="Save frequency")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--use_wandb", action="store_true", help="Use Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str, default="llama-skip-predictors", help="W&B project name")
@@ -404,41 +366,30 @@ def main():
         for module in model.modules():
             if any(hasattr(p, 'is_meta') and p.is_meta for p in module.parameters()) and isinstance(module, FastLoRAProjection):
                 module = module.to_empty(device="cpu")
+                with torch.no_grad():
+                    torch.nn.init.xavier_normal_(module.down.weight)
+                    torch.nn.init.zeros_(module.up.weight)  # Initialize up projection to zeros for stable training
+                
         model.tie_weights()
         model = model.to(device)
     
     # Load training data
-    train_texts, val_texts = load_training_data(
-        args.dataset, args.dataset_config, args.num_samples, args.max_length
-    )
-    
-    # Create datasets and dataloaders
-    train_dataset = TextDataset(train_texts, tokenizer, args.max_length)
-    val_dataset = TextDataset(val_texts, tokenizer, args.max_length)
-    
-    train_dataloader = DataLoader(
-        train_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-    val_dataloader = DataLoader(
-        val_dataset, 
-        batch_size=args.batch_size, 
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
+    train_dataset, val_dataset = load_training_data(
+        tokenizer,
+        args.dataset, 
+        args.dataset_config,
+        args.max_length
     )
     
     # Train predictors
     train_predictors(
         model=model,
-        train_dataloader=train_dataloader,
-        val_dataloader=val_dataloader,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
         device=device,
+        batch_size=args.batch_size,
         save_dir=args.output_dir,
         eval_steps=args.eval_steps,
         save_steps=args.save_steps,

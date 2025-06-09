@@ -56,15 +56,8 @@ class FastLoRAProjection(nn.Module):
         self.intermediate_size = intermediate_size
         self.lora_size = lora_size
         # Force creation of linear layers with actual tensors (not meta tensors)
-        self.down = nn.Linear(hidden_size, lora_size, bias=False, device="cpu")
-        self.up = nn.Linear(lora_size, intermediate_size, bias=False, device="cpu")
-        
-        # Initialize weights immediately with actual values
-        with torch.no_grad():
-            # Use small initialization to prevent extreme values
-            torch.nn.init.normal_(self.down.weight, mean=0.0, std=0.02)
-            torch.nn.init.zeros_(self.up.weight)  # Initialize up projection to zeros for stable training
-        
+        self.down = nn.Linear(hidden_size, lora_size, bias=False)
+        self.up = nn.Linear(lora_size, intermediate_size, bias=False)
         # Pre-allocate buffers on CPU initially
         self.register_buffer('intermediate', torch.zeros(1, lora_size))
         self.register_buffer('output', torch.zeros(1, intermediate_size))

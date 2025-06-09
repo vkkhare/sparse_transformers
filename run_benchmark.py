@@ -92,8 +92,11 @@ def reset_model_state(model: AutoModelForCausalLM, model_device: torch.device = 
 
     if model_device.type == 'cuda':
         for module in model.modules():
-            if any(hasattr(p, 'is_meta') and p.is_meta for p in module.parameters()):
+            if any(hasattr(p, 'is_meta') and p.is_meta for p in module.parameters()) and isinstance(module, FastLoRAProjection):
                 module = module.to_empty(device="cpu")
+                with torch.no_grad():
+                    torch.nn.init.xavier_normal_(module.down.weight)
+                    torch.nn.init.zeros_(module.up.weight)  # Initialize up projection to zeros for stable training
         model.tie_weights()
         model = model.to(model_device)
     
