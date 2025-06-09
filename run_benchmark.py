@@ -90,19 +90,13 @@ def reset_model_state(model: AutoModelForCausalLM, model_device: torch.device = 
     
     gc.collect()
 
-    # Check if model has any meta tensors
-    has_meta_tensors = any(
-        (hasattr(p, 'is_meta') and p.is_meta) or 
-        (hasattr(p, 'device') and p.device.type == 'meta')
-        for p in model.parameters()
-    )
-    
-    if has_meta_tensors and model_device.type == 'cuda':
-        # Use to_empty() for models with meta tensors
-        print("Detected meta tensors, using to_empty() for device transfer...")
-        model = model.to_empty(device=model_device)
+    if model_device.type == 'cuda':
+        for module in model.modules():
+            if any(hasattr(p, 'is_meta') and p.is_meta for p in module.parameters()):
+                module = module.to_empty(device="cpu")
         model.tie_weights()
-
+        model = model.to(model_device)
+    
     # Clear past key values cache
     if hasattr(model, 'past_key_values'):
         model.past_key_values = None

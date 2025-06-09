@@ -36,7 +36,7 @@ from datasets import load_dataset
 import wandb
 from tqdm import tqdm
 
-from src.models.llama.modelling_llama_skip import LlamaSkipConnectionForCausalLM
+from src.models.llama.modelling_llama_skip import LlamaSkipConnectionForCausalLM, FastLoRAProjection
 from src.models.llama.configuration_llama_skip import LlamaSkipConnectionConfig
 
 # Setup logging
@@ -255,12 +255,11 @@ def train_predictors(
         
         for batch in progress_bar:
             input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            
+            print("input_ids", input_ids.detach().cpu().numpy())
             # Forward pass
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            outputs = model(input_ids=input_ids)
             loss = outputs.loss
-                
+            print("loss", loss.item())
             # Backward pass
             optimizer.zero_grad()
             loss.backward()
@@ -402,7 +401,13 @@ def main():
     # Load model
     logger.info("Loading model...")
     model = LlamaSkipConnectionForCausalLM.from_pretrained(checkpoint, config=config)
-    model = model.to(device)
+    
+    if device.type == 'cuda':
+        for module in model.modules():
+            if any(hasattr(p, 'is_meta') and p.is_meta for p in module.parameters()) and isinstance(module, FastLoRAProjection):
+                module = module.to_empty(device="cpu")
+        model.tie_weights()
+        model = model.to(device)
     
     # Load training data
     train_texts, val_texts = load_training_data(

@@ -19,9 +19,7 @@ from transformers.models.llama.modeling_llama import(
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.processing_utils import Unpack
 from transformers.modeling_layers import GradientCheckpointingLayer
-from transformers.utils import (
-    can_return_tuple, logging, is_torch_flex_attn_available
-)
+from transformers.utils import logging, is_torch_flex_attn_available
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
@@ -39,7 +37,6 @@ from sparse_transformers import (
 )
 
 from src.models.llama.configuration_llama_skip import LlamaSkipConnectionConfig
-from src.predictor_loss import PredictorTrainingLoss
 
 logger = logging.get_logger(__name__)
 
@@ -58,16 +55,25 @@ class FastLoRAProjection(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.lora_size = lora_size
-        self.down = nn.Linear(hidden_size, lora_size, bias=False, )
-        self.up = nn.Linear(lora_size, intermediate_size, bias=False)
+        # Force creation of linear layers with actual tensors (not meta tensors)
+        self.down = nn.Linear(hidden_size, lora_size, bias=False, device="cpu")
+        self.up = nn.Linear(lora_size, intermediate_size, bias=False, device="cpu")
+        
+        # Initialize weights immediately with actual values
+        with torch.no_grad():
+            # Use small initialization to prevent extreme values
+            torch.nn.init.normal_(self.down.weight, mean=0.0, std=0.02)
+            torch.nn.init.zeros_(self.up.weight)  # Initialize up projection to zeros for stable training
         
         # Pre-allocate buffers on CPU initially
         self.register_buffer('intermediate', torch.zeros(1, lora_size))
         self.register_buffer('output', torch.zeros(1, intermediate_size))
     
+
     def to(self, *args, **kwargs):
-        # Move mask to same device as model when .to() is called
+        # Move buffers to same device as model when .to() is called
         device = args[0] if args else kwargs.get('device')
+        
         if device:
             self.intermediate = self.intermediate.to(device)
             self.output = self.output.to(device)
@@ -199,15 +205,8 @@ class LlamaSkipDecoderLayer(GradientCheckpointingLayer):
         if self.is_training_config:
             # Standard MLP for ground truth collection during training
             self.mlp = LlamaMLP(config)
-            
             # Loss function for predictor training
-            self.predictor_loss_fn = PredictorTrainingLoss(
-                loss_type=getattr(config, 'predictor_loss_type', 'bce'),
-                temperature=getattr(config, 'predictor_temperature', 1.0),
-                alpha=getattr(config, 'predictor_loss_alpha', 1.0),
-                confidence_penalty=getattr(config, 'predictor_confidence_penalty', 0.1),
-                focal_gamma=getattr(config, 'predictor_focal_gamma', 2.0)
-            )
+            self.predictor_loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
         else:
             self.mlp = LlamaSkipMLP(
                 config.hidden_size,
@@ -224,22 +223,20 @@ class LlamaSkipDecoderLayer(GradientCheckpointingLayer):
     def get_ground_truth_activations(self, hidden_states: torch.Tensor) -> torch.Tensor:            
         # Compute standard MLP intermediate activations
         gate_proj = self.mlp.gate_proj(hidden_states)
-        
         # Apply SiLU activation to gate projection
-        gate_activated = F.silu(gate_proj)
+        gate_activated = F.silu(gate_proj).clamp(min=1e-7, max=1.0 - 1e-7).round().detach()
         
         return gate_activated
 
     def compute_predictor_loss(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Compute loss for training the sparsity predictor."""
         # Get predictor scores
-        predicted_scores = self.mlp_lora_proj(hidden_states.view(-1, hidden_states.shape[-1]))
-        
+        predicted_scores = self.mlp_lora_proj(hidden_states.view(-1, hidden_states.shape[-1])).view(hidden_states.shape[0], hidden_states.shape[1], -1)
         # Get ground truth activations
         ground_truth_activations = self.get_ground_truth_activations(hidden_states)
-        
+        # print(ground_truth_activations.cpu().numpy())
         # Compute predictor loss
-        loss = self.predictor_loss_fn(predicted_scores, ground_truth_activations, self.sparsity)
+        loss = self.predictor_loss_fn(predicted_scores, ground_truth_activations)
         
         return loss
     
@@ -290,7 +287,6 @@ class LlamaSkipDecoderLayer(GradientCheckpointingLayer):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-
         if self.training and self.is_training_config:
             predictor_loss = self.compute_predictor_loss(hidden_states)
         else:
@@ -364,27 +360,10 @@ class LlamaSkipConnectionModel(LlamaSkipPreTrainedModel):
     def freeze_non_predictor_parameters(self):
         """Freeze all parameters except predictor networks."""
         # Freeze main model parameters
-        for param in self.embed_tokens.parameters():
+        for param in self.parameters():
             param.requires_grad = False
-        for param in self.norm.parameters():
-            param.requires_grad = False
-        for param in self.rotary_emb.parameters():
-            param.requires_grad = False
-            
-        # Freeze layer parameters except predictors
+
         for layer in self.layers:
-            # Freeze attention parameters
-            for param in layer.self_attn.parameters():
-                param.requires_grad = False
-            for param in layer.input_layernorm.parameters():
-                param.requires_grad = False
-            for param in layer.post_attention_layernorm.parameters():
-                param.requires_grad = False
-                
-            # Freeze sparse MLP parameters
-            for param in layer.mlp.parameters():
-                param.requires_grad = False
-                
             # Keep predictor parameters trainable
             for param in layer.mlp_lora_proj.parameters():
                 param.requires_grad = True
