@@ -145,11 +145,18 @@ sparse_mlp_forward(
 # Clone repository
 git clone https://github.com/nimbleedge/sparse_transformers.git
 cd sparse_transformers
+```
 
-# Install in editable mode (builds C++ extensions automatically)
+Set up conda environment and install dependencies
+```bash
 conda create -n sparse_transformers python=3.10
 conda activate sparse_transformers
-conda install pytorch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 pytorch-cuda=12.4 -c pytorch -c nvidia
+```
+
+Install torch dependencies from [requirements.txt](requirements.txt#L2)
+
+```bash
+# Install in editable mode (builds C++ extensions automatically)
 pip install -r requirements.txt
 python setup.py build_ext --inplace
 

@@ -91,9 +91,7 @@ torch::Tensor sparse_mlp_forward_cpu(
         auto hidden_size = original_shape.back();
         auto total_batch_size = input.numel() / hidden_size;
         input_2d = input.view({total_batch_size, hidden_size});
-    }
-    else
-    {
+    } else {
         input_2d = input;
     }
 
@@ -101,47 +99,61 @@ torch::Tensor sparse_mlp_forward_cpu(
     const auto hidden_size = input_2d.size(1);
 
     // Ensure output buffer is correctly sized
-    if (down_proj_buffer.size(0) != batch_size)
-    {
+    // Check both dimensions to avoid resize warnings
+    const int64_t expected_gate_dim = concat_weight.size(0);
+
+    // For down_proj_buffer: [batch_size, hidden_size]
+    if (down_proj_buffer.size(0) != batch_size || down_proj_buffer.size(1) != hidden_size)
         down_proj_buffer.resize_({batch_size, hidden_size});
-    }
-    if (combined_proj_buffer.size(0) != batch_size)
-    {
-        combined_proj_buffer.resize_({batch_size, 2 * int(concat_weight.size(0))});
+
+    // For combined_proj_buffer: [batch_size, 2 * gate_size]
+    if (combined_proj_buffer.size(0) != batch_size || combined_proj_buffer.size(1) != expected_gate_dim)
+        combined_proj_buffer.resize_({batch_size, expected_gate_dim});
+
+    // Optimal grain size for heavy matmul operations
+    const int64_t num_threads = at::get_num_threads();
+    int64_t grain_size = 1;
+    
+    if (batch_size > num_threads && num_threads > 0) {
+        // Base calculation: create 2-4x more work chunks than threads
+        const int64_t target_chunks = num_threads * 3;  // 3x oversubscription
+        grain_size = std::max(int64_t(1), batch_size / target_chunks);
+        
+        // Cap at 32 for heavy operations (much smaller than 64 for light ops)
+        const int64_t max_grain_matmul = 32;
+        grain_size = std::min(grain_size, max_grain_matmul);
     }
 
-    // Process each batch item in parallel
-    at::parallel_for(0, batch_size, 1, [&](int64_t start, int64_t end)
+    // Process each batch block in parallel
+    at::parallel_for(0, batch_size, grain_size, [&](int64_t start, int64_t end)
                      {
-        for (int64_t batch_idx = start; batch_idx < end; batch_idx++) {
-            int64_t gate_size = concat_weight.size(0) / 2;
-            auto x_batch = input_2d[batch_idx].unsqueeze(0).detach();
-            
-            // Single matmul for both gate and up projections
-            auto proj_view = combined_proj_buffer[batch_idx].unsqueeze(0).narrow(1, 0, concat_weight.size(0));
-            torch::matmul_out(proj_view, x_batch, concat_weight.t());
-            
-            // Split result into gate and up projections
-            auto gate_proj = proj_view.narrow(1, 0, gate_size);
-            auto up_proj = proj_view.narrow(1, gate_size, gate_size);
-            
-            // Apply activations
-            gate_proj.mul_(torch::sigmoid(gate_proj));
-            gate_proj.mul_(up_proj);
-            
-            // Final projection
-            down_proj_buffer[batch_idx] = torch::matmul(gate_proj, active_down_weight.t())[0];
-        } });
+        // Process blocks of batches instead of single items
+        const int64_t block_size = end - start;
+        const int64_t gate_size = concat_weight.size(0) / 2;
+        
+        // Get input block for this thread
+        auto input_block = input_2d.slice(0, start, end);  // [block_size, hidden_size]
+        
+        // Get output buffer views for this block
+        auto combined_proj_block = combined_proj_buffer.slice(0, start, end);  // [block_size, 2*gate_size]
+        auto down_proj_block = down_proj_buffer.slice(0, start, end);  // [block_size, hidden_size]
+        
+        // Perform batch matrix multiplication for gate and up projections
+        // This is more efficient than individual matmuls
+        torch::matmul_out(combined_proj_block, input_block, concat_weight.t());
+        
+        // Split into gate and up projections
+        auto gate_proj = combined_proj_block.narrow(1, 0, gate_size);  // [block_size, gate_size]
+        auto up_proj = combined_proj_block.narrow(1, gate_size, gate_size);  // [block_size, gate_size]
+
+        gate_proj.sigmoid_();  // In-place sigmoid
+        gate_proj.mul_(up_proj);  // In-place element-wise multiplication
+        
+        // Final projection to output dimension
+        torch::matmul_out(down_proj_block, gate_proj, active_down_weight.t()); });
 
     // Reshape output back to original shape if input was multi-dimensional
-    if (needs_reshape)
-    {
-        return down_proj_buffer.view(original_shape);
-    }
-    else
-    {
-        return down_proj_buffer;
-    }
+    return needs_reshape ? down_proj_buffer.view(original_shape) : down_proj_buffer;
 }
 
 // Register TorchScript custom classes and operators

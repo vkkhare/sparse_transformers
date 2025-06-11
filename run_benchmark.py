@@ -8,7 +8,7 @@ import numpy as np
 
 import torch
 from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
-from src.models.llama.modelling_llama_skip import LlamaSkipConnectionForCausalLM
+from src.models.llama.modelling_llama_skip import LlamaSkipConnectionForCausalLM, FastLoRAProjection
 from src.models.llama.configuration_llama_skip import LlamaSkipConnectionConfig
 from src.utilities.cuda_utils import GPUMonitor, setup_cuda_debugging
 from src.utilities.sys_utils import print_system_info
@@ -90,16 +90,6 @@ def reset_model_state(model: AutoModelForCausalLM, model_device: torch.device = 
     
     gc.collect()
 
-    if model_device.type == 'cuda':
-        for module in model.modules():
-            if any(hasattr(p, 'is_meta') and p.is_meta for p in module.parameters()) and isinstance(module, FastLoRAProjection):
-                module = module.to_empty(device="cpu")
-                with torch.no_grad():
-                    torch.nn.init.xavier_normal_(module.down.weight)
-                    torch.nn.init.zeros_(module.up.weight)  # Initialize up projection to zeros for stable training
-        model.tie_weights()
-        model = model.to(model_device)
-    
     # Clear past key values cache
     if hasattr(model, 'past_key_values'):
         model.past_key_values = None
@@ -110,6 +100,7 @@ def reset_model_state(model: AutoModelForCausalLM, model_device: torch.device = 
     
     # Disable caching for fresh inference
     model.config.use_cache = False
+    model.to(model_device)
     model.eval()
     if hasattr(model, 'reset_cache'):
         model.reset_cache()
@@ -418,6 +409,14 @@ def main():
 
     # Always run SkipLLaMA benchmark with HuggingFace
     skip_model = LlamaSkipConnectionForCausalLM.from_pretrained(checkpoint, config=config)
+    for module in skip_model.modules():
+        if any(hasattr(p, 'is_meta') and p.is_meta for p in module.parameters()) and isinstance(module, FastLoRAProjection):
+            module = module.to_empty(device="cpu")
+            with torch.no_grad():
+                torch.nn.init.xavier_normal_(module.down.weight)
+                torch.nn.init.zeros_(module.up.weight)  # Initialize up projection to zeros for stable training
+    skip_model.tie_weights()
+    
     skip_results = run_inference(
         model=skip_model,
         tokenizer=tokenizer,
