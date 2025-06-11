@@ -145,10 +145,20 @@ sparse_mlp_forward(
 # Clone repository
 git clone https://github.com/nimbleedge/sparse_transformers.git
 cd sparse_transformers
+```
 
+Set up conda environment and install dependencies
+```bash
+conda create -n sparse_transformers python=3.10
+conda activate sparse_transformers
+```
+
+Install torch dependencies from [requirements.txt](requirements.txt#L2)
+
+```bash
 # Install in editable mode (builds C++ extensions automatically)
 pip install -r requirements.txt
-pip install -e .
+python setup.py build_ext --inplace
 
 # Verify installation
 python -c "import sparse_transformers; print('✅ Installation successful!')"
