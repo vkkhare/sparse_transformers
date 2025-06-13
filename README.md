@@ -1,3 +1,5 @@
+[![Join us on Discord](https://img.shields.io/badge/Join%20us-Discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/CxzDDffR)
+
 # Fused Sparse C++ Kernels for Transformers
 
 ## Overview
@@ -163,6 +165,10 @@ python setup.py build_ext --inplace
 # Verify installation
 python -c "import sparse_transformers; print('✅ Installation successful!')"
 ```
+
+## Community engagement
+We welcome any feedback or suggestions - please join our
+[Discord](https://discord.gg/CxzDDffR) to engage with the community.
 
 ## Contributing
 We welcome contributions from the community! Areas of particular interest are:
