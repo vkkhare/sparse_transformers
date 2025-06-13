@@ -72,7 +72,7 @@ def ddp_setup(rank: int, world_size: int):
     # Set additional environment variables for better performance
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     torch.cuda.set_device(rank)
-    init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    init_process_group(rank=rank, world_size=world_size)
 
 
 def cleanup():
@@ -99,8 +99,8 @@ def load_training_data(tokenizer: AutoTokenizer,
     if dataset_name == "allenai/c4":
         train_dataset = load_dataset(dataset_name, dataset_config, split="train")
         train_dataset = train_dataset.with_format("torch")
-        val_dataset = train_dataset.take(num_samples//100+1)
-        train_dataset = train_dataset.skip(num_samples//100+1)
+        val_dataset = train_dataset.take(1000)
+        train_dataset = train_dataset.skip(1000).take(num_samples)
         
         # Apply tokenization
         if rank == 0:
