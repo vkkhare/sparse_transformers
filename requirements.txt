@@ -8,4 +8,5 @@ attrs
 scikit-learn
 accelerate
 datasets
+ninja
 #wandb

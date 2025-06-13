@@ -1,5 +1,5 @@
 # limitations under the License.
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List, Dict
 
 import torch
 import torch.utils.checkpoint
@@ -42,7 +42,7 @@ logger = logging.get_logger(__name__)
 
 @dataclass
 class BaseModelOutputWithPastAndPredictorLoss(ModelOutput):
-    loss: Optional[torch.FloatTensor] = None
+    loss: Optional[Union[List[torch.FloatTensor], Dict[str, float]]] = None
     last_hidden_state: Optional[torch.FloatTensor] = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
@@ -50,7 +50,7 @@ class BaseModelOutputWithPastAndPredictorLoss(ModelOutput):
 
 
 class FastLoRAProjection(nn.Module):
-    def __init__(self, hidden_size, intermediate_size, lora_size):
+    def __init__(self, hidden_size, intermediate_size, lora_size, is_training_config: bool = False):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -61,7 +61,7 @@ class FastLoRAProjection(nn.Module):
         # Pre-allocate buffers on CPU initially
         self.register_buffer('intermediate', torch.zeros(1, lora_size))
         self.register_buffer('output', torch.zeros(1, intermediate_size))
-    
+        self.is_training_config = is_training_config
 
     def to(self, *args, **kwargs):
         # Move buffers to same device as model when .to() is called
@@ -85,7 +85,7 @@ class FastLoRAProjection(nn.Module):
         batch_size = x.size(0)
         
         # Check if gradients are required (training mode)
-        if self.training:
+        if self.is_training_config:
             # Use regular matrix multiplication for gradient computation
             intermediate = torch.mm(x, self.down.weight.t())
             output = torch.mm(intermediate, self.up.weight.t())
@@ -186,14 +186,17 @@ class LlamaSkipDecoderLayer(GradientCheckpointingLayer):
         self.post_attention_layernorm = LlamaSkipRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
                 # Create LoRA projection for sparsity prediction
         self.lora_size = int(config.intermediate_size * 0.04)
+                
+        # Check if this is a training configuration
+        self.is_training_config = getattr(config, 'training', False)
+
         self.mlp_lora_proj = FastLoRAProjection(
             config.hidden_size, 
             config.intermediate_size,
-            self.lora_size
+            self.lora_size,
+            self.is_training_config
         )
-        
-        # Check if this is a training configuration
-        self.is_training_config = getattr(config, 'training', False)
+
         # Only initialize predictor training components if explicitly enabled
         if self.is_training_config:
             # Standard MLP for ground truth collection during training
@@ -217,11 +220,13 @@ class LlamaSkipDecoderLayer(GradientCheckpointingLayer):
         # Compute standard MLP intermediate activations
         gate_proj = self.mlp.gate_proj(hidden_states)
         # Apply SiLU activation to gate projection
-        gate_activated = F.silu(gate_proj).clamp(min=1e-7, max=1.0 - 1e-7).round().detach()
+        gate_activated_mask = F.silu(gate_proj)
+        gate_activated_mask[gate_activated_mask <= 0] = 0
+        gate_activated_mask[gate_activated_mask > 0] = 1
         
-        return gate_activated
+        return gate_activated_mask
 
-    def compute_predictor_loss(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def compute_predictor_loss(self, hidden_states: torch.Tensor, capture_activations: bool) -> torch.Tensor:
         """Compute loss for training the sparsity predictor."""
         # Get predictor scores
         predicted_scores = self.mlp_lora_proj(hidden_states.view(-1, hidden_states.shape[-1])).view(hidden_states.shape[0], hidden_states.shape[1], -1)
@@ -229,9 +234,10 @@ class LlamaSkipDecoderLayer(GradientCheckpointingLayer):
         ground_truth_activations = self.get_ground_truth_activations(hidden_states)
         # print(ground_truth_activations.cpu().numpy())
         # Compute predictor loss
-        loss = self.predictor_loss_fn(predicted_scores, ground_truth_activations)
-        
-        return loss
+        if capture_activations:
+            return (predicted_scores, ground_truth_activations)
+        else:
+            return self.predictor_loss_fn(predicted_scores, ground_truth_activations)
     
     def forward(
         self,
@@ -243,11 +249,12 @@ class LlamaSkipDecoderLayer(GradientCheckpointingLayer):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        capture_activations: Optional[bool] = False,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        if not self.training:  # Use PyTorch's built-in training flag
+        if not self.is_training_config:  # Use PyTorch's built-in training flag
             # 1. LoRA projection to get importance scores
             lora_proj_scores = self.mlp_lora_proj(hidden_states.view(-1, hidden_states.shape[-1]))
             # # 2. Ultra-fast sparsity-based threshold using C++ Count-Min Sketch operator
@@ -280,8 +287,8 @@ class LlamaSkipDecoderLayer(GradientCheckpointingLayer):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        if self.training and self.is_training_config:
-            predictor_loss = self.compute_predictor_loss(hidden_states)
+        if self.is_training_config:
+            predictor_loss = self.compute_predictor_loss(hidden_states, capture_activations)
         else:
             predictor_loss = None
         hidden_states = residual + hidden_states
@@ -455,13 +462,9 @@ class LlamaSkipConnectionModel(LlamaSkipPreTrainedModel):
         # add hidden states from the last decoder layer
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
-        # Compute total predictor loss
-        total_predictor_loss = None
-        if all_predictor_losses:
-            total_predictor_loss = torch.stack(all_predictor_losses).mean()
 
         return BaseModelOutputWithPastAndPredictorLoss(
-            loss=total_predictor_loss,
+            loss=all_predictor_losses,
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
@@ -721,10 +724,10 @@ class LlamaSkipConnectionForCausalLM(LlamaSkipPreTrainedModel, GenerationMixin):
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
             
             # Combine with predictor loss if in training mode
-            if outputs.loss is not None:
+            if outputs.loss is not None and isinstance(outputs.loss[0], torch.FloatTensor):
                 # Weight the predictor loss (can be configured)
                 predictor_weight = getattr(self.config, 'predictor_loss_weight', 0.1)
-                total_loss = loss + predictor_weight * outputs.loss
+                total_loss = loss + predictor_weight * torch.stack(outputs.loss).mean()
             else:
                 total_loss = loss
         elif outputs.loss is not None:
@@ -740,4 +743,4 @@ class LlamaSkipConnectionForCausalLM(LlamaSkipPreTrainedModel, GenerationMixin):
         )
 
 
-__all__ = [LlamaSkipConnectionForCausalLM, LlamaSkipMLP, FastLoRAProjection]
+__all__ = [LlamaSkipConnectionForCausalLM, LlamaSkipMLP, LlamaSkipDecoderLayer, FastLoRAProjection]

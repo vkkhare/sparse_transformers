@@ -9,7 +9,7 @@ class LlamaSkipConnectionConfig(LlamaConfig):
     model_type = "llama-skip"
 
     def __init__(self, 
-                 sparsity: float,
+                 sparsity: float = 0.3,
                  predictor_loss_type: str = "bce",
                  predictor_temperature: float = 1.0,
                  predictor_loss_alpha: float = 1.0,
