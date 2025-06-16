@@ -145,8 +145,8 @@ torch::Tensor sparse_mlp_forward_cpu(
         // Split into gate and up projections
         auto gate_proj = combined_proj_block.narrow(1, 0, gate_size);  // [block_size, gate_size]
         auto up_proj = combined_proj_block.narrow(1, gate_size, gate_size);  // [block_size, gate_size]
-
-        gate_proj.sigmoid_();  // In-place sigmoid
+        auto activation = gate_proj.sigmoid();  // In-place sigmoid
+        gate_proj.mul_(activation);  // In-place sigmoid
         gate_proj.mul_(up_proj);  // In-place element-wise multiplication
         
         // Final projection to output dimension

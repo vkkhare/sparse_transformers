@@ -92,9 +92,9 @@ class FastLoRAProjection(nn.Module):
             return output
         else:
             # # Use optimized in-place operations for inference
-            # intermediate = torch.mm(x, self.down.weight.t())
-            # output = torch.mm(intermediate, self.up.weight.t())
-            # return output
+            intermediate = torch.mm(x, self.down.weight.t())
+            output = torch.mm(intermediate, self.up.weight.t())
+            return output
         
             self._resize_buffers(batch_size, x.dtype)
             torch.mm(x, self.down.weight.t(), out=self.intermediate)
@@ -147,6 +147,8 @@ class LlamaSkipMLP(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = sparse_mlp_forward(
             x.detach(), 
+            # torch.cat([self.gate_proj.weight, self.up_proj.weight], dim=0).detach(),
+            # self.down_proj.weight.detach(),
             self.weight_cache.get_concat_weight(),
             self.weight_cache.get_active_down_weight(),
             self.down_proj_buffer,
@@ -265,9 +267,11 @@ class LlamaSkipDecoderLayer(GradientCheckpointingLayer):
             # threshold = approx_topk_threshold(lora_proj_scores, k)
             
             # 3. Binary mask creation
-            binary_mask = (lora_proj_scores >= lora_proj_scores.mean() + 2 * lora_proj_scores.std()).bool()
+            binary_mask = (F.sigmoid(lora_proj_scores) > 0.5).bool().any(dim=0)
+            binary_mask[int(self.sparsity*8192):] = 0
+            # print(binary_mask.sum())
             # Normalize 2D mask to 1D by taking union across batch dimension
-            self.weight_cache.update_active_weights(binary_mask.any(dim=0))  # [batch_size, intermediate_size] → [intermediate_size]
+            self.weight_cache.update_active_weights(binary_mask)  # [batch_size, intermediate_size] → [intermediate_size]
           
         # Self Attention
         hidden_states, self_attn_weights = self.self_attn(

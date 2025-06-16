@@ -44,7 +44,7 @@ from transformers import (
     AutoTokenizer, 
     AutoConfig, 
     AutoModelForCausalLM,
-    get_linear_schedule_with_warmup,
+    get_cosine_schedule_with_warmup,
     set_seed
 )
 from datasets import load_dataset
@@ -72,7 +72,7 @@ def ddp_setup(rank: int, world_size: int):
     # Set additional environment variables for better performance
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     torch.cuda.set_device(rank)
-    init_process_group(rank=rank, world_size=world_size)
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
 def cleanup():
@@ -228,24 +228,24 @@ def train_predictors(
         train_dataset,
         batch_size=batch_size, 
         sampler=train_sampler,
-        num_workers=4,  # Reduced for distributed training
+        num_workers=16,  # Reduced for distributed training
         pin_memory=True,
-        prefetch_factor=2
+        prefetch_factor=4
     )
     val_dataloader = DataLoader(
         val_dataset, 
         batch_size=batch_size,
         sampler=val_sampler,
-        num_workers=2,
+        num_workers=4,
         pin_memory=True,
-        prefetch_factor=2
+        prefetch_factor=4
     )
     
     # Setup scheduler
     total_steps = num_steps * num_epochs
-    scheduler = get_linear_schedule_with_warmup(
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=int(0.1 * total_steps),
+        num_warmup_steps=8000,
         num_training_steps=total_steps
     )
     
@@ -348,14 +348,15 @@ def train_predictors(
 
         # End of epoch logging (only on rank 0)
         if rank == 0:
-            avg_loss = epoch_loss / num_batches
-            logger.info(f"Epoch {epoch+1} completed. Average loss: {avg_loss:.4f}")
+            if num_batches != 0:
+                avg_loss = epoch_loss / num_batches
+                logger.info(f"Epoch {epoch+1} completed. Average loss: {avg_loss:.4f}")
             
-            if use_wandb:
-                wandb.log({
-                    "train/epoch_loss": avg_loss,
-                    "epoch": epoch + 1
-                })
+                if use_wandb:
+                    wandb.log({
+                        "train/epoch_loss": avg_loss,
+                        "epoch": epoch + 1
+                    })
             
             if progress_bar is not None:
                 progress_bar.close()
