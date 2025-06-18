@@ -1,12 +1,11 @@
-from transformers import LlamaConfig
-from optimum.utils import NormalizedTextConfig, MistralDummyPastKeyValuesGenerator, DummyTextInputGenerator
+from transformers import Qwen2Config,  PretrainedConfig
 import os
 from typing import Union, Any
-from optimum.exporters.onnx.config import TextDecoderWithPositionIdsOnnxConfig
 
 
-class LlamaSkipConnectionConfig(LlamaConfig):
-    model_type = "llama-skip"
+
+class Qwen2SkipConnectionConfig(Qwen2Config):
+    model_type = "qwen2-skip"
     has_no_defaults_at_init: bool = True
 
     def __init__(self, 
@@ -50,15 +49,7 @@ class LlamaSkipConnectionConfig(LlamaConfig):
         return cls(**config_dict)
 
     @classmethod
-    def from_dict(cls, config_dict: dict[str, Any], **kwargs) -> "LlamaSkipConnectionConfig":
+    def from_dict(cls, config_dict: dict[str, Any], **kwargs) -> "Qwen2SkipConnectionConfig":
         if "name_or_path" in kwargs:
             del kwargs["name_or_path"]
         return super().from_dict(config_dict, **kwargs)
-
-
-class LlamaOnnxConfig(TextDecoderWithPositionIdsOnnxConfig):
-    DEFAULT_ONNX_OPSET = 14  # Llama now uses F.scaled_dot_product_attention by default for torch>=2.1.1.
-
-    DUMMY_INPUT_GENERATOR_CLASSES = (DummyTextInputGenerator, MistralDummyPastKeyValuesGenerator)
-    DUMMY_PKV_GENERATOR_CLASS = MistralDummyPastKeyValuesGenerator
-    NORMALIZED_CONFIG_CLASS = NormalizedTextConfig
