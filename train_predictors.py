@@ -70,7 +70,6 @@ def ddp_setup(rank: int, world_size: int):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
     # Set additional environment variables for better performance
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
     torch.cuda.set_device(rank)
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
@@ -85,13 +84,10 @@ def load_training_data(tokenizer: AutoTokenizer,
                       dataset_config: str = "realnewslike",
                       max_length: int = 2000,
                       num_samples: int = 13800000,
-                      rank: int = 0,
-                      world_size: int = 1
                       ) -> Tuple[Dataset, Dataset]:
     """Load and prepare training data."""
-    if rank == 0:
-        logger.info(f"Loading dataset: {dataset_name}/{dataset_config}")
-        logger.info(f"Target number of samples: {num_samples}")
+    logger.info(f"Loading dataset: {dataset_name}/{dataset_config}")
+    logger.info(f"Target number of samples: {num_samples}")
     
     def tokenize_function(examples):
         return tokenizer(examples["text"], padding="max_length", truncation=True, max_length=max_length)
@@ -100,19 +96,20 @@ def load_training_data(tokenizer: AutoTokenizer,
         train_dataset = load_dataset(dataset_name, dataset_config, split="train")
         train_dataset = train_dataset.with_format("torch")
         val_dataset = train_dataset.take(1000)
-        train_dataset = train_dataset.skip(1000).take(num_samples)
+        if num_samples < len(train_dataset)-1000:
+            train_dataset = train_dataset.skip(1000).take(num_samples)
+        else:
+            train_dataset = train_dataset.skip(1000)
         
         # Apply tokenization
-        if rank == 0:
-            logger.info("Tokenizing datasets...")
+        logger.info("Tokenizing datasets...")
         train_dataset = train_dataset.map(tokenize_function, batched=True)
         val_dataset = val_dataset.map(tokenize_function, batched=True)
     else:
         raise ValueError(f"Dataset {dataset_name} not supported")
     
-    if rank == 0:
-        logger.info(f"Final train dataset size: {len(train_dataset)}")
-        logger.info(f"Final val dataset size: {len(val_dataset)}")
+    logger.info(f"Final train dataset size: {len(train_dataset)}")
+    logger.info(f"Final val dataset size: {len(val_dataset)}")
     
     return train_dataset, val_dataset
 
@@ -368,7 +365,7 @@ def train_predictors(
         logger.info("Training completed!")
 
 
-def main_worker(rank: int, world_size: int, args):
+def main_worker(rank: int, world_size: int, train_dataset: Dataset, val_dataset: Dataset, checkpoint: str, config: LlamaSkipConnectionConfig, args):
     """Main worker function for distributed training."""
     
     # Setup distributed training
@@ -403,49 +400,29 @@ def main_worker(rank: int, world_size: int, args):
             name=f"predictor-training-ddp-{int(time.time())}"
         )
     
-    # Load model configuration
-    config = LlamaSkipConnectionConfig.from_json_file(args.config)
-    checkpoint = config._name_or_path
-    
-    # Register custom models
-    AutoConfig.register("llama-skip", LlamaSkipConnectionConfig)
-    AutoModelForCausalLM.register(LlamaSkipConnectionConfig, LlamaSkipConnectionForCausalLM)
-    
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token
-    
     # Load model
     if rank == 0:
         logger.info("Loading model...")
-    model = LlamaSkipConnectionForCausalLM.from_pretrained(checkpoint, config=config)
-    
-    # Initialize meta tensors
-    for module in model.modules():
-        if any(hasattr(p, 'is_meta') and p.is_meta for p in module.parameters()) and isinstance(module, FastLoRAProjection):
-            module = module.to_empty(device="cpu")
-            with torch.no_grad():
-                torch.nn.init.xavier_normal_(module.down.weight)
-                torch.nn.init.zeros_(module.up.weight)  # Initialize up projection to zeros for stable training
-                
-    model.tie_weights()
+    if args.checkpoint is None:
+        model = LlamaSkipConnectionForCausalLM.from_pretrained(config._name_or_path, config=config)    
+        # Initialize meta tensors
+        for module in model.modules():
+            if any(hasattr(p, 'is_meta') and p.is_meta for p in module.parameters()) and isinstance(module, FastLoRAProjection):
+                module = module.to_empty(device="cpu")
+                with torch.no_grad():
+                    torch.nn.init.xavier_normal_(module.down.weight)
+                    torch.nn.init.zeros_(module.up.weight)  # Initialize up projection to zeros for stable training
+                    
+        model.tie_weights()
+    else:
+        model = LlamaSkipConnectionForCausalLM.from_pretrained(checkpoint)
+
     model = model.to(device)
     
     # Wrap model with DDP
     if args.use_ddp:
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
-    
-    # Load training data
-    train_dataset, val_dataset = load_training_data(
-        tokenizer,
-        args.dataset, 
-        args.dataset_config,
-        args.max_length,
-        args.num_samples,
-        rank=rank,
-        world_size=world_size
-    )
-    
+
     # Train predictors
     train_predictors(
         model=model,
@@ -494,8 +471,28 @@ def main():
     parser.add_argument("--wandb_entity", type=str, default="llama-skip-predictors", help="W&B entity name")
     parser.add_argument("--device", type=str, default="auto", help="Device to use (auto, cpu, cuda)")
     parser.add_argument("--use_ddp", action="store_true", help="Use Distributed Data Parallel")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Checkpoint to use")
     
     args = parser.parse_args()
+    
+    # Load model configuration
+    config = LlamaSkipConnectionConfig.from_json_file(args.config)
+    # Register custom models
+    AutoConfig.register("llama-skip", LlamaSkipConnectionConfig)
+    AutoModelForCausalLM.register(LlamaSkipConnectionConfig, LlamaSkipConnectionForCausalLM)
+    
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(config._name_or_path, trust_remote_code=True)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # Load training data
+    train_dataset, val_dataset = load_training_data(
+        tokenizer,
+        args.dataset, 
+        args.dataset_config,
+        args.max_length,
+        args.num_samples
+    )
     
     if args.use_ddp:
         # Multi-GPU training with DDP
@@ -503,13 +500,13 @@ def main():
         if world_size < 2:
             logger.warning("DDP requested but only 1 GPU available. Falling back to single GPU training.")
             args.use_ddp = False
-            main_worker(0, 1, args)
+            main_worker(0, 1, train_dataset, val_dataset, args.checkpoint, config, args)
         else:
             logger.info(f"Starting DDP training on {world_size} GPUs")
-            mp.spawn(main_worker, args=(world_size, args), nprocs=world_size, join=True)
+            mp.spawn(main_worker, args=(world_size, train_dataset, val_dataset, args.checkpoint, config, args), nprocs=world_size, join=True)
     else:
         # Single GPU training
-        main_worker(0, 1, args)
+        main_worker(0, 1, train_dataset, val_dataset, args.checkpoint, config, args)
 
 
 if __name__ == "__main__":
